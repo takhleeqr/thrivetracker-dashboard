@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Edit3, MonitorCheck, Plus, RefreshCw, Trash2, UsersRound, type LucideIcon } from "lucide-react";
+import { Edit3, MonitorCheck, Plus, RefreshCw, RotateCcw, Trash2, UsersRound, type LucideIcon } from "lucide-react";
 import { Button, Card, Input, ModalFrame, Table, Tabs } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatHours } from "@/lib/format";
-import { deactivateVa, loadTeamManagement, saveVa, type ManagedVa, type TeamProjectOption, type VaFormInput } from "@/lib/team-data";
+import { loadSettings } from "@/lib/settings-data";
+import { deactivateVa, loadTeamManagement, reactivateVa, saveVa, type ManagedVa, type TeamProjectOption, type VaFormInput } from "@/lib/team-data";
 import { supabase } from "@/lib/supabase";
+import { formatDateTimeFull, formatTime } from "@/lib/timezone";
 
 const navItems = [
   { label: "Overview", href: "/" },
@@ -24,8 +26,21 @@ const emptyForm: VaFormInput = {
   email: "",
   password: "",
   isActive: true,
+  expectedHoursPerWeek: "0",
+  hourlyRate: "0",
   assignedProjectIds: [],
+  workingDays: [],
 };
+
+const workingDayOptions = [
+  { label: "Mon", value: "mon" },
+  { label: "Tue", value: "tue" },
+  { label: "Wed", value: "wed" },
+  { label: "Thu", value: "thu" },
+  { label: "Fri", value: "fri" },
+  { label: "Sat", value: "sat" },
+  { label: "Sun", value: "sun" },
+];
 
 export default function TeamPage() {
   const router = useRouter();
@@ -38,6 +53,7 @@ export default function TeamPage() {
   const [error, setError] = useState("");
   const [form, setForm] = useState<VaFormInput | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [timezone, setTimezone] = useState("Asia/Karachi");
 
   useEffect(() => {
     let isMounted = true;
@@ -53,6 +69,8 @@ export default function TeamPage() {
       }
 
       setAdmin(profile);
+      const settings = await loadSettings(supabase);
+      setTimezone(settings.timezone);
       await refreshData();
     }
 
@@ -107,6 +125,19 @@ export default function TeamPage() {
     }
   }
 
+  async function restoreVa(va: ManagedVa) {
+    const confirmed = window.confirm(`Reactivate "${va.full_name}"? They will be able to log in again.`);
+    if (!confirmed) return;
+
+    try {
+      setError("");
+      await reactivateVa(va);
+      await refreshData();
+    } catch (restoreError) {
+      setError(restoreError instanceof Error ? restoreError.message : "Could not reactivate VA.");
+    }
+  }
+
   const visibleVas = useMemo(() => {
     if (statusFilter === "all") return team;
     return team.filter((va) => va.is_active);
@@ -135,7 +166,7 @@ export default function TeamPage() {
             <h2>Team</h2>
             <p className="subtle-line">
               {admin ? admin.full_name : "Checking session"}
-              {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+              {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
             </p>
           </div>
           <div className="topbar-actions">
@@ -175,17 +206,19 @@ export default function TeamPage() {
             </div>
 
             <Table className="projects-table">
-              <div className="table-row project-table-row table-head">
+              <div className="table-row team-table-row table-head">
                 <span>VA</span>
                 <span>Projects</span>
+                <span>Rate</span>
                 <span>Weekly Hours</span>
+                <span>Expected</span>
                 <span>Last Seen</span>
                 <span>Status</span>
                 <span>Actions</span>
               </div>
               {visibleVas.length ? (
                 visibleVas.map((va) => (
-                  <div className="table-row data-row project-table-row" key={va.id}>
+                  <div className="table-row data-row team-table-row" key={va.id}>
                     <span className="project-name-cell">
                       <span>
                         <strong>{va.full_name}</strong>
@@ -193,8 +226,10 @@ export default function TeamPage() {
                       </span>
                     </span>
                     <span>{va.assignedProjects.length ? va.assignedProjects.join(", ") : "Unassigned"}</span>
+                    <span>${va.hourlyRate.toFixed(2)}/hr</span>
                     <span>{formatHours(va.totalHoursSeconds)}</span>
-                    <span>{va.lastSeenAt ? new Date(va.lastSeenAt).toLocaleString() : "-"}</span>
+                    <span>{va.expectedHoursPerWeek ? `${va.expectedHoursPerWeek}h` : "-"}</span>
+                    <span>{formatDateTimeFull(va.lastSeenAt, timezone)}</span>
                     <span>
                       <span className={`status-pill ${va.is_active ? "status-online" : "status-offline"}`}>
                         {va.is_active ? "active" : "inactive"}
@@ -210,7 +245,12 @@ export default function TeamPage() {
                           <Trash2 size={15} />
                           Deactivate
                         </Button>
-                      ) : null}
+                      ) : (
+                        <Button onClick={() => restoreVa(va)} type="button" variant="secondary">
+                          <RotateCcw size={15} />
+                          Reactivate
+                        </Button>
+                      )}
                     </span>
                   </div>
                 ))
@@ -265,6 +305,16 @@ function VaEditor({
     onChange({ ...form, assignedProjectIds: [...assigned] });
   }
 
+  function toggleWorkingDay(day: string) {
+    const workingDays = new Set(form.workingDays);
+    if (workingDays.has(day)) {
+      workingDays.delete(day);
+    } else {
+      workingDays.add(day);
+    }
+    onChange({ ...form, workingDays: [...workingDays] });
+  }
+
   return (
     <div className="modal-backdrop">
       <ModalFrame className="project-editor">
@@ -312,6 +362,41 @@ function VaEditor({
               <option value="inactive">Inactive</option>
             </select>
           </label>
+          <label>
+            Hourly Rate ($/hr)
+            <Input
+              min="0"
+              onChange={(event) => onChange({ ...form, hourlyRate: event.target.value })}
+              placeholder="0.00"
+              step="0.01"
+              type="number"
+              value={form.hourlyRate}
+            />
+          </label>
+          <label>
+            Expected Hours Per Week
+            <Input
+              min="0"
+              onChange={(event) => onChange({ ...form, expectedHoursPerWeek: event.target.value })}
+              placeholder="40"
+              step="0.25"
+              type="number"
+              value={form.expectedHoursPerWeek}
+            />
+          </label>
+        </div>
+
+        <div className="assignment-box">
+          <p className="eyebrow">Working Days</p>
+          <div className="day-check-grid">
+            {workingDayOptions.map((day) => (
+              <label className="day-check" key={day.value}>
+                <input checked={form.workingDays.includes(day.value)} onChange={() => toggleWorkingDay(day.value)} type="checkbox" />
+                <span>{day.label}</span>
+              </label>
+            ))}
+          </div>
+          <p className="subtle-line">Leave all unchecked to exclude this VA from Late / No Show schedule alerts.</p>
         </div>
 
         <div className="assignment-box">
@@ -363,6 +448,9 @@ function vaToForm(va: ManagedVa): VaFormInput {
     email: va.email,
     password: "", // Never fetch password, only allow reset
     isActive: va.is_active,
+    expectedHoursPerWeek: String(va.expectedHoursPerWeek ?? 0),
+    hourlyRate: String(va.hourlyRate ?? 0),
     assignedProjectIds: va.assignedProjectIds,
+    workingDays: va.workingDays,
   };
 }

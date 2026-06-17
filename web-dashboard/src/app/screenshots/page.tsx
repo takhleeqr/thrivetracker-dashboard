@@ -7,6 +7,7 @@ import { Camera, Download, Filter, RefreshCw, X } from "lucide-react";
 import { Button, Card, Input, ModalFrame, Select } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatPercent } from "@/lib/format";
+import { loadSettings } from "@/lib/settings-data";
 import {
   loadScreenshotFilters,
   loadScreenshots,
@@ -14,6 +15,7 @@ import {
   type ScreenshotOption,
 } from "@/lib/screenshots-data";
 import { supabase } from "@/lib/supabase";
+import { formatDateTimeFull, formatTime, todayDateInputValue } from "@/lib/timezone";
 
 const PAGE_SIZE = 24;
 const navItems = [
@@ -38,7 +40,8 @@ export default function ScreenshotsPage() {
   const [error, setError] = useState("");
   const [userId, setUserId] = useState("");
   const [projectId, setProjectId] = useState("");
-  const [date, setDate] = useState(toDateInputValue(new Date()));
+  const [timezone, setTimezone] = useState("Asia/Karachi");
+  const [date, setDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
@@ -57,11 +60,13 @@ export default function ScreenshotsPage() {
       }
 
       setAdmin(profile);
+      const settings = await loadSettings(supabase);
+      setTimezone(settings.timezone);
       const filters = await loadScreenshotFilters(supabase);
       if (!isMounted) return;
       setVas(filters.vas);
       setProjects(filters.projects);
-      await refreshScreenshots(0);
+      await refreshScreenshots(0, settings.timezone);
     }
 
     boot();
@@ -78,12 +83,13 @@ export default function ScreenshotsPage() {
       offset: 0,
       projectId: projectId || undefined,
       startTime: startTime || undefined,
+      timezone,
       userId: userId || undefined,
     }),
-    [date, endTime, projectId, startTime, userId],
+    [date, endTime, projectId, startTime, timezone, userId],
   );
 
-  async function refreshScreenshots(offset: number) {
+  async function refreshScreenshots(offset: number, selectedTimezone = timezone) {
     try {
       setError("");
       if (offset === 0) {
@@ -95,6 +101,7 @@ export default function ScreenshotsPage() {
       const result = await loadScreenshots(supabase, {
         ...currentFilter,
         offset,
+        timezone: selectedTimezone,
       });
 
       setItems((previous) => (offset === 0 ? result.items : [...previous, ...result.items]));
@@ -131,7 +138,7 @@ export default function ScreenshotsPage() {
             <h2>Screenshots</h2>
             <p className="subtle-line">
               {admin ? admin.full_name : "Checking session"}
-              {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+              {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
             </p>
           </div>
           <div className="topbar-actions">
@@ -204,7 +211,7 @@ export default function ScreenshotsPage() {
                   <small>{item.projectName}</small>
                 </span>
                 <span>
-                  <small>{new Date(item.captured_at).toLocaleString()}</small>
+                  <small>{formatDateTimeFull(item.captured_at, timezone)}</small>
                   <small>{item.activity_percent_at_capture === null ? "Activity -" : formatPercent(item.activity_percent_at_capture)}</small>
                 </span>
               </button>
@@ -227,12 +234,12 @@ export default function ScreenshotsPage() {
         ) : null}
       </section>
 
-      {selected ? <ScreenshotLightbox item={selected} onClose={() => setSelected(null)} /> : null}
+      {selected ? <ScreenshotLightbox item={selected} onClose={() => setSelected(null)} timezone={timezone} /> : null}
     </main>
   );
 }
 
-function ScreenshotLightbox({ item, onClose }: { item: ScreenshotBrowserItem; onClose: () => void }) {
+function ScreenshotLightbox({ item, onClose, timezone }: { item: ScreenshotBrowserItem; onClose: () => void; timezone: string }) {
   return (
     <div className="modal-backdrop screenshot-lightbox-backdrop">
       <ModalFrame className="screenshot-lightbox">
@@ -241,7 +248,7 @@ function ScreenshotLightbox({ item, onClose }: { item: ScreenshotBrowserItem; on
             <p className="eyebrow">{item.vaName}</p>
             <h3>{item.projectName}</h3>
             <p className="subtle-line">
-              {new Date(item.captured_at).toLocaleString()} ·{" "}
+              {formatDateTimeFull(item.captured_at, timezone)} -{" "}
               {item.activity_percent_at_capture === null ? "Activity -" : formatPercent(item.activity_percent_at_capture)}
             </p>
           </div>
@@ -274,9 +281,3 @@ function downloadScreenshot(url: string, storageKey: string) {
   link.click();
 }
 
-function toDateInputValue(date: Date): string {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}

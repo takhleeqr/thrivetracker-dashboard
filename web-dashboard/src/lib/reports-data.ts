@@ -1,9 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { dateInputValue, endOfDayIso, startOfDayIso } from "@/lib/timezone";
 
 export type ReportFilter = {
   endDate: string;
   projectId?: string;
   startDate: string;
+  timezone?: string;
   userId?: string;
 };
 
@@ -16,6 +18,7 @@ export type TimeReportRow = {
   userId: string;
   vaName: string;
   totalSeconds: number;
+  earnings: number;
   entryCount: number;
   manualEntries: number;
 };
@@ -52,10 +55,20 @@ export type ProjectReportRow = {
   vaCount: number;
 };
 
+export type PayrollReportRow = {
+  date: string;
+  earnings: number;
+  hourlyRate: number;
+  totalSeconds: number;
+  userId: string;
+  vaName: string;
+};
+
 export type ReportsData = {
   activityRows: ActivityReportRow[];
   appRows: AppUsageReportRow[];
   attendanceRows: AttendanceReportRow[];
+  payrollRows: PayrollReportRow[];
   projectRows: ProjectReportRow[];
   timeRows: TimeReportRow[];
 };
@@ -63,6 +76,7 @@ export type ReportsData = {
 type ProfileRow = {
   id: string;
   full_name: string;
+  hourly_rate: number;
 };
 
 type ProjectRow = {
@@ -113,7 +127,7 @@ export async function loadReports(supabase: SupabaseClient, filter: ReportFilter
   const { start, end } = buildReportRange(filter);
 
   const [profilesResult, projectsResult, entriesResult, activityResult] = await Promise.all([
-    supabase.from("profiles").select("id,full_name").eq("role", "va"),
+    supabase.from("profiles").select("id,full_name,hourly_rate").eq("role", "va"),
     supabase.from("projects").select("id,name"),
     supabase
       .from("time_entries")
@@ -139,6 +153,7 @@ export async function loadReports(supabase: SupabaseClient, filter: ReportFilter
   const profiles = (profilesResult.data ?? []) as ProfileRow[];
   const projects = (projectsResult.data ?? []) as ProjectRow[];
   const profileNames = new Map(profiles.map((profile) => [profile.id, profile.full_name]));
+  const hourlyRates = new Map(profiles.map((profile) => [profile.id, Number(profile.hourly_rate ?? 0)]));
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
 
   const entries = ((entriesResult.data ?? []) as TimeEntryRow[]).filter((entry) => {
@@ -154,27 +169,25 @@ export async function loadReports(supabase: SupabaseClient, filter: ReportFilter
   });
 
   return {
-    timeRows: buildTimeRows(entries, profileNames),
+    timeRows: buildTimeRows(entries, profileNames, hourlyRates),
     activityRows: buildActivityRows(activityLogs, profileNames),
     appRows: buildAppRows(activityLogs),
     attendanceRows: buildAttendanceRows(entries, profileNames),
+    payrollRows: buildPayrollRows(entries, profileNames, hourlyRates, filter.timezone ?? "Asia/Karachi"),
     projectRows: buildProjectRows(entries, projectNames),
   };
 }
 
 export function buildReportRange(filter: ReportFilter) {
-  const start = fromDateInputValue(filter.startDate);
-  const end = fromDateInputValue(filter.endDate);
-  start.setHours(0, 0, 0, 0);
-  end.setHours(23, 59, 59, 999);
+  const timezone = filter.timezone ?? "Asia/Karachi";
 
   return {
-    start: start.toISOString(),
-    end: end.toISOString(),
+    start: startOfDayIso(filter.startDate, timezone),
+    end: endOfDayIso(filter.endDate, timezone),
   };
 }
 
-function buildTimeRows(entries: TimeEntryRow[], profileNames: Map<string, string>): TimeReportRow[] {
+function buildTimeRows(entries: TimeEntryRow[], profileNames: Map<string, string>, hourlyRates: Map<string, number>): TimeReportRow[] {
   const rows = new Map<string, TimeReportRow>();
 
   for (const entry of entries) {
@@ -182,16 +195,46 @@ function buildTimeRows(entries: TimeEntryRow[], profileNames: Map<string, string
       userId: entry.user_id,
       vaName: profileNames.get(entry.user_id) ?? "Unknown VA",
       totalSeconds: 0,
+      earnings: 0,
       entryCount: 0,
       manualEntries: 0,
     };
     row.totalSeconds += entry.duration_seconds ?? 0;
+    row.earnings = earningsForSeconds(row.totalSeconds, hourlyRates.get(entry.user_id) ?? 0);
     row.entryCount += 1;
     row.manualEntries += entry.is_manual ? 1 : 0;
     rows.set(entry.user_id, row);
   }
 
   return [...rows.values()].sort((first, second) => second.totalSeconds - first.totalSeconds);
+}
+
+function buildPayrollRows(
+  entries: TimeEntryRow[],
+  profileNames: Map<string, string>,
+  hourlyRates: Map<string, number>,
+  timezone: string,
+): PayrollReportRow[] {
+  const rows = new Map<string, PayrollReportRow>();
+
+  for (const entry of entries) {
+    const date = dateInputValue(entry.started_at, timezone);
+    const hourlyRate = hourlyRates.get(entry.user_id) ?? 0;
+    const key = `${entry.user_id}-${date}`;
+    const row = rows.get(key) ?? {
+      date,
+      earnings: 0,
+      hourlyRate,
+      totalSeconds: 0,
+      userId: entry.user_id,
+      vaName: profileNames.get(entry.user_id) ?? "Unknown VA",
+    };
+    row.totalSeconds += entry.duration_seconds ?? 0;
+    row.earnings = earningsForSeconds(row.totalSeconds, hourlyRate);
+    rows.set(key, row);
+  }
+
+  return [...rows.values()].sort((first, second) => first.date.localeCompare(second.date) || first.vaName.localeCompare(second.vaName));
 }
 
 function buildActivityRows(logs: ActivityLogRow[], profileNames: Map<string, string>): ActivityReportRow[] {
@@ -294,13 +337,6 @@ function buildProjectRows(entries: TimeEntryRow[], projectNames: Map<string, str
     .sort((first, second) => second.totalSeconds - first.totalSeconds);
 }
 
-function fromDateInputValue(value: string): Date {
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date();
-  date.setFullYear(year, month - 1, day);
-  return date;
-}
-
 function cleanName(value: string): string {
   const trimmed = value.trim();
   return trimmed.length > 64 ? `${trimmed.slice(0, 61)}...` : trimmed || "Unknown";
@@ -314,4 +350,8 @@ function earliest(current: string | null, candidate: string): string {
 function latest(current: string | null, candidate: string): string {
   if (!current) return candidate;
   return new Date(candidate).getTime() > new Date(current).getTime() ? candidate : current;
+}
+
+function earningsForSeconds(seconds: number, hourlyRate: number) {
+  return Number(((seconds / 3600) * hourlyRate).toFixed(2));
 }

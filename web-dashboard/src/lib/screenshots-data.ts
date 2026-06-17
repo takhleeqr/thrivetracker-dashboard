@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { endOfDayIso, startOfDayIso, zonedDateTimeToUtc } from "@/lib/timezone";
 
 export type ScreenshotFilter = {
   userId?: string;
@@ -6,6 +7,7 @@ export type ScreenshotFilter = {
   date: string;
   startTime?: string;
   endTime?: string;
+  timezone?: string;
   offset: number;
   limit: number;
 };
@@ -120,37 +122,14 @@ export async function loadScreenshots(
 }
 
 function buildScreenshotRange(filter: ScreenshotFilter) {
-  const start = fromDateInputValue(filter.date);
-  const end = fromDateInputValue(filter.date);
-
-  if (filter.startTime) {
-    applyTime(start, filter.startTime);
-  } else {
-    start.setHours(0, 0, 0, 0);
-  }
-
-  if (filter.endTime) {
-    applyTime(end, filter.endTime);
-  } else {
-    end.setHours(23, 59, 59, 999);
-  }
+  const timezone = filter.timezone ?? "Asia/Karachi";
+  const start = filter.startTime ? zonedDateTimeToUtc(filter.date, filter.startTime, timezone).toISOString() : startOfDayIso(filter.date, timezone);
+  const end = filter.endTime ? zonedDateTimeToUtc(filter.date, filter.endTime, timezone, 59, 999).toISOString() : endOfDayIso(filter.date, timezone);
 
   return {
-    start: start.toISOString(),
-    end: end.toISOString(),
+    start,
+    end,
   };
-}
-
-function fromDateInputValue(value: string): Date {
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date();
-  date.setFullYear(year, month - 1, day);
-  return date;
-}
-
-function applyTime(date: Date, value: string) {
-  const [hours, minutes] = value.split(":").map(Number);
-  date.setHours(hours, minutes, 0, 0);
 }
 
 function unique(values: string[]): string[] {

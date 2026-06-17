@@ -7,10 +7,13 @@ export type ManagedVa = {
   email: string;
   is_active: boolean;
   created_at: string;
+  expectedHoursPerWeek: number;
   lastSeenAt: string | null;
+  hourlyRate: number;
   totalHoursSeconds: number;
   assignedProjectIds: string[];
   assignedProjects: string[];
+  workingDays: string[];
 };
 
 export type VaFormInput = {
@@ -19,7 +22,10 @@ export type VaFormInput = {
   email: string;
   password?: string;
   isActive: boolean;
+  expectedHoursPerWeek: string;
+  hourlyRate: string;
   assignedProjectIds: string[];
+  workingDays: string[];
 };
 
 export type TeamProjectOption = {
@@ -32,8 +38,11 @@ type ProfileRow = {
   full_name: string;
   email: string;
   is_active: boolean;
+  expected_hours_per_week: number;
+  hourly_rate: number;
   created_at: string;
   last_seen_at: string | null;
+  working_days: string[];
 };
 
 type TimeEntryRow = {
@@ -56,7 +65,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
   const [profilesResult, entriesResult, projectsResult, assignmentsResult] = await Promise.all([
     supabase
       .from("profiles")
-      .select("id,full_name,email,is_active,created_at,last_seen_at")
+      .select("id,full_name,email,is_active,created_at,last_seen_at,hourly_rate,expected_hours_per_week,working_days")
       .eq("role", "va")
       .order("full_name", { ascending: true }),
     supabase.from("time_entries").select("user_id,duration_seconds").gte("started_at", weekStart),
@@ -84,12 +93,15 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
         id: profile.id,
         full_name: profile.full_name,
         email: profile.email,
+        expectedHoursPerWeek: Number(profile.expected_hours_per_week ?? 0),
+        hourlyRate: Number(profile.hourly_rate ?? 0),
         is_active: profile.is_active,
         created_at: profile.created_at,
         lastSeenAt: profile.last_seen_at,
         totalHoursSeconds: userEntries.reduce((sum, entry) => sum + (entry.duration_seconds ?? 0), 0),
         assignedProjectIds: userAssignments.map((assignment) => assignment.project_id),
         assignedProjects: userAssignments.map((assignment) => projectNames.get(assignment.project_id) ?? "Unknown"),
+        workingDays: profile.working_days ?? [],
       };
     }),
     projects: projects.map((project) => ({ id: project.id, name: project.name })),
@@ -118,6 +130,20 @@ export async function deactivateVa(userId: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await response.text());
   }
+}
+
+export async function reactivateVa(va: ManagedVa): Promise<void> {
+  await saveVa({
+    assignedProjectIds: va.assignedProjectIds,
+    email: va.email,
+    expectedHoursPerWeek: String(va.expectedHoursPerWeek ?? 0),
+    fullName: va.full_name,
+    hourlyRate: String(va.hourlyRate ?? 0),
+    id: va.id,
+    isActive: true,
+    password: "",
+    workingDays: va.workingDays,
+  });
 }
 
 async function authHeaders(): Promise<HeadersInit> {

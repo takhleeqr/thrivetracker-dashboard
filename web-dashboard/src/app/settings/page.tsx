@@ -9,6 +9,7 @@ import { Button, Card, Input, Select } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { defaultSettings, loadSettings, saveSettings, type AppSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
+import { formatTime, supportedTimezones } from "@/lib/timezone";
 
 const navItems = [
   { label: "Overview", href: "/" },
@@ -19,7 +20,7 @@ const navItems = [
   { label: "Settings", href: "/settings" },
 ];
 
-const timezones = ["UTC", "Asia/Karachi", "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles", "Europe/London"];
+const timezones = supportedTimezones();
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -88,6 +89,10 @@ export default function SettingsPage() {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
+  function updateUnproductiveApps(value: string) {
+    updateSetting("app_categories_unproductive", appsTextToJson(value));
+  }
+
   return (
     <main className="dashboard-shell">
       <aside className="sidebar">
@@ -111,7 +116,7 @@ export default function SettingsPage() {
             <h2>Settings</h2>
             <p className="subtle-line">
               {admin ? admin.full_name : "Checking session"}
-              {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+              {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, settings.timezone)}` : ""}
             </p>
           </div>
           <div className="topbar-actions">
@@ -159,7 +164,7 @@ export default function SettingsPage() {
           </Card>
 
           <Card className="detail-card settings-card">
-            <SectionTitle title="Quality and Alerts" />
+            <SectionTitle title="Quality" />
             <SettingField label="Screenshot quality" suffix={`${settings.screenshot_quality}%`}>
               <Input
                 max="100"
@@ -169,6 +174,10 @@ export default function SettingsPage() {
                 value={settings.screenshot_quality}
               />
             </SettingField>
+          </Card>
+
+          <Card className="detail-card settings-card">
+            <SectionTitle title="Alert Thresholds" />
             <SettingField label="Low activity threshold" suffix={`${settings.low_activity_threshold}%`}>
               <Input
                 max="100"
@@ -178,6 +187,25 @@ export default function SettingsPage() {
                 value={settings.low_activity_threshold}
               />
             </SettingField>
+            <SettingField label="Low activity duration" suffix="minutes">
+              <Input
+                min="1"
+                onChange={(event) => updateSetting("low_activity_minimum_minutes", event.target.value)}
+                type="number"
+                value={settings.low_activity_minimum_minutes}
+              />
+            </SettingField>
+            <SettingField label="Late start time">
+              <Input onChange={(event) => updateSetting("late_start_time", event.target.value)} type="time" value={settings.late_start_time} />
+            </SettingField>
+            <div className="settings-note">
+              <Settings2 size={18} />
+              <p>Low activity alerts fire when activity stays below the threshold for the selected number of consecutive minutes.</p>
+            </div>
+            <div className="settings-note">
+              <Settings2 size={18} />
+              <p>Productivity Score is a 0-100 weighted average of activity percentages across tracked sessions today.</p>
+            </div>
           </Card>
 
           <Card className="detail-card settings-card">
@@ -214,6 +242,21 @@ export default function SettingsPage() {
               <p>Retention cleanup is planned next; this value is saved now so cleanup jobs can use it later.</p>
             </div>
           </Card>
+
+          <Card className="detail-card settings-card">
+            <SectionTitle title="App Categories" />
+            <SettingField label="Unproductive apps" suffix="comma separated">
+              <Input
+                onChange={(event) => updateUnproductiveApps(event.target.value)}
+                placeholder="YouTube, Netflix, Spotify"
+                value={unproductiveAppsText(settings.app_categories_unproductive)}
+              />
+            </SettingField>
+            <div className="settings-note">
+              <Settings2 size={18} />
+              <p>Apps listed here will be flagged on VA detail pages when detected in activity logs.</p>
+            </div>
+          </Card>
         </section>
 
         {isLoading ? <p className="subtle-line">Loading settings...</p> : null}
@@ -222,7 +265,7 @@ export default function SettingsPage() {
   );
 }
 
-function SectionTitle({ title }: { title: string }) {
+  function SectionTitle({ title }: { title: string }) {
   return (
     <div className="section-heading">
       <div>
@@ -230,6 +273,24 @@ function SectionTitle({ title }: { title: string }) {
         <h3>{title}</h3>
       </div>
     </div>
+  );
+}
+
+function unproductiveAppsText(value: string) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.join(", ") : "";
+  } catch {
+    return "";
+  }
+}
+
+function appsTextToJson(value: string) {
+  return JSON.stringify(
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
   );
 }
 

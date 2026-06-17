@@ -7,21 +7,24 @@ import { Download, FileSpreadsheet, RefreshCw } from "lucide-react";
 import { Button, Card, Input, Select, Table, Tabs } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
+import { loadSettings } from "@/lib/settings-data";
 import {
   loadReportOptions,
   loadReports,
   type ActivityReportRow,
   type AppUsageReportRow,
   type AttendanceReportRow,
+  type PayrollReportRow,
   type ProjectReportRow,
   type ReportOption,
   type ReportsData,
   type TimeReportRow,
 } from "@/lib/reports-data";
 import { supabase } from "@/lib/supabase";
+import { formatDateTimeFull, formatTime, todayDateInputValue } from "@/lib/timezone";
 import { downloadXlsx } from "@/lib/xlsx-export";
 
-type ReportTab = "time" | "activity" | "apps" | "attendance" | "projects";
+type ReportTab = "time" | "activity" | "apps" | "attendance" | "payroll" | "projects";
 
 const navItems = [
   { label: "Overview", href: "/" },
@@ -36,6 +39,7 @@ const emptyReports: ReportsData = {
   activityRows: [],
   appRows: [],
   attendanceRows: [],
+  payrollRows: [],
   projectRows: [],
   timeRows: [],
 };
@@ -47,8 +51,9 @@ export default function ReportsPage() {
   const [vas, setVas] = useState<ReportOption[]>([]);
   const [projects, setProjects] = useState<ReportOption[]>([]);
   const [activeTab, setActiveTab] = useState<ReportTab>("time");
-  const [startDate, setStartDate] = useState(toDateInputValue(new Date()));
-  const [endDate, setEndDate] = useState(toDateInputValue(new Date()));
+  const [timezone, setTimezone] = useState("Asia/Karachi");
+  const [startDate, setStartDate] = useState(todayDateInputValue("Asia/Karachi"));
+  const [endDate, setEndDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [userId, setUserId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -60,9 +65,10 @@ export default function ReportsPage() {
       endDate,
       projectId: projectId || undefined,
       startDate,
+      timezone,
       userId: userId || undefined,
     }),
-    [endDate, projectId, startDate, userId],
+    [endDate, projectId, startDate, timezone, userId],
   );
 
   useEffect(() => {
@@ -79,11 +85,13 @@ export default function ReportsPage() {
       }
 
       setAdmin(profile);
+      const settings = await loadSettings(supabase);
+      setTimezone(settings.timezone);
       const options = await loadReportOptions(supabase);
       if (!isMounted) return;
       setVas(options.vas);
       setProjects(options.projects);
-      await refreshReports();
+      await refreshReports(settings.timezone);
     }
 
     boot();
@@ -92,11 +100,11 @@ export default function ReportsPage() {
     };
   }, [router]);
 
-  async function refreshReports() {
+  async function refreshReports(selectedTimezone = timezone) {
     try {
       setError("");
       setIsLoading(true);
-      const nextReports = await loadReports(supabase, currentFilter);
+      const nextReports = await loadReports(supabase, { ...currentFilter, timezone: selectedTimezone });
       setReports(nextReports);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
@@ -134,11 +142,11 @@ export default function ReportsPage() {
             <h2>Reports</h2>
             <p className="subtle-line">
               {admin ? admin.full_name : "Checking session"}
-              {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+              {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
             </p>
           </div>
           <div className="topbar-actions">
-            <Button onClick={refreshReports} type="button" variant="secondary">
+            <Button onClick={() => refreshReports()} type="button" variant="secondary">
               <RefreshCw size={16} />
               Refresh
             </Button>
@@ -183,7 +191,7 @@ export default function ReportsPage() {
                 ))}
               </Select>
             </label>
-            <Button onClick={refreshReports} type="button">
+            <Button onClick={() => refreshReports()} type="button">
               Apply
             </Button>
           </div>
@@ -191,6 +199,7 @@ export default function ReportsPage() {
 
         <section className="stats-grid detail-stats" aria-label="Report stats">
           <ReportStat label="Tracked Hours" value={formatHours(sumTime(reports.timeRows))} />
+          <ReportStat label="Payable" value={formatMoney(sumPayroll(reports.payrollRows))} />
           <ReportStat label="Average Activity" value={formatPercent(averageActivity(reports.activityRows))} />
           <ReportStat label="Apps Seen" value={String(reports.appRows.length)} />
           <ReportStat label="Projects Used" value={String(reports.projectRows.length)} />
@@ -215,6 +224,9 @@ export default function ReportsPage() {
               <button className={activeTab === "attendance" ? "selected" : ""} onClick={() => setActiveTab("attendance")} type="button">
                 Attendance
               </button>
+              <button className={activeTab === "payroll" ? "selected" : ""} onClick={() => setActiveTab("payroll")} type="button">
+                Payroll
+              </button>
               <button className={activeTab === "projects" ? "selected" : ""} onClick={() => setActiveTab("projects")} type="button">
                 Projects
               </button>
@@ -228,7 +240,7 @@ export default function ReportsPage() {
               <p>Calculating time, activity, app usage, attendance, and project totals.</p>
             </div>
           ) : (
-            <ReportTable activeTab={activeTab} reports={reports} />
+            <ReportTable activeTab={activeTab} reports={reports} timezone={timezone} />
           )}
         </Card>
       </section>
@@ -236,11 +248,12 @@ export default function ReportsPage() {
   );
 }
 
-function ReportTable({ activeTab, reports }: { activeTab: ReportTab; reports: ReportsData }) {
+function ReportTable({ activeTab, reports, timezone }: { activeTab: ReportTab; reports: ReportsData; timezone: string }) {
   if (activeTab === "time") return <TimeTable rows={reports.timeRows} />;
   if (activeTab === "activity") return <ActivityTable rows={reports.activityRows} />;
   if (activeTab === "apps") return <AppsTable rows={reports.appRows} />;
-  if (activeTab === "attendance") return <AttendanceTable rows={reports.attendanceRows} />;
+  if (activeTab === "attendance") return <AttendanceTable rows={reports.attendanceRows} timezone={timezone} />;
+  if (activeTab === "payroll") return <PayrollTable rows={reports.payrollRows} />;
   return <ProjectsTable rows={reports.projectRows} />;
 }
 
@@ -250,6 +263,7 @@ function TimeTable({ rows }: { rows: TimeReportRow[] }) {
       <div className="table-row reports-table-row table-head">
         <span>VA</span>
         <span>Total Hours</span>
+        <span>Earnings</span>
         <span>Entries</span>
         <span>Manual</span>
       </div>
@@ -257,8 +271,32 @@ function TimeTable({ rows }: { rows: TimeReportRow[] }) {
         <div className="table-row data-row reports-table-row" key={row.userId}>
           <span>{row.vaName}</span>
           <span>{formatHours(row.totalSeconds)}</span>
+          <span>{formatMoney(row.earnings)}</span>
           <span>{row.entryCount}</span>
           <span>{row.manualEntries}</span>
+        </div>
+      )) : <ReportEmpty />}
+    </Table>
+  );
+}
+
+function PayrollTable({ rows }: { rows: PayrollReportRow[] }) {
+  return (
+    <Table className="reports-table">
+      <div className="table-row reports-table-row table-head">
+        <span>Date</span>
+        <span>VA</span>
+        <span>Hours</span>
+        <span>Rate</span>
+        <span>Payable</span>
+      </div>
+      {rows.length ? rows.map((row) => (
+        <div className="table-row data-row reports-table-row" key={`${row.userId}-${row.date}`}>
+          <span>{row.date}</span>
+          <span>{row.vaName}</span>
+          <span>{formatHours(row.totalSeconds)}</span>
+          <span>{formatMoney(row.hourlyRate)}/hr</span>
+          <span>{formatMoney(row.earnings)}</span>
         </div>
       )) : <ReportEmpty />}
     </Table>
@@ -310,7 +348,7 @@ function AppsTable({ rows }: { rows: AppUsageReportRow[] }) {
   );
 }
 
-function AttendanceTable({ rows }: { rows: AttendanceReportRow[] }) {
+function AttendanceTable({ rows, timezone }: { rows: AttendanceReportRow[]; timezone: string }) {
   return (
     <Table className="reports-table">
       <div className="table-row reports-table-row table-head">
@@ -323,8 +361,8 @@ function AttendanceTable({ rows }: { rows: AttendanceReportRow[] }) {
         <div className="table-row data-row reports-table-row" key={row.userId}>
           <span>{row.vaName}</span>
           <span>{row.daysWorked}</span>
-          <span>{row.firstStart ? new Date(row.firstStart).toLocaleString() : "-"}</span>
-          <span>{row.lastStop ? new Date(row.lastStop).toLocaleString() : "-"}</span>
+          <span>{formatDateTimeFull(row.firstStart, timezone)}</span>
+          <span>{formatDateTimeFull(row.lastStop, timezone)}</span>
         </div>
       )) : <ReportEmpty />}
     </Table>
@@ -378,7 +416,7 @@ function xlsxForReport(activeTab: ReportTab, reports: ReportsData) {
   if (activeTab === "time") {
     return {
       filename: "thrivetracker-time-report.xlsx",
-      rows: [["VA", "Total Hours", "Entries", "Manual Entries"], ...reports.timeRows.map((row) => [row.vaName, formatHours(row.totalSeconds), row.entryCount, row.manualEntries])],
+      rows: [["VA", "Total Hours", "Earnings", "Entries", "Manual Entries"], ...reports.timeRows.map((row) => [row.vaName, formatHours(row.totalSeconds), formatMoney(row.earnings), row.entryCount, row.manualEntries])],
       sheetName: "Time Report",
     };
   }
@@ -403,6 +441,13 @@ function xlsxForReport(activeTab: ReportTab, reports: ReportsData) {
       sheetName: "Attendance",
     };
   }
+  if (activeTab === "payroll") {
+    return {
+      filename: "thrivetracker-payroll-report.xlsx",
+      rows: [["Date", "VA", "Hours", "Hourly Rate", "Payable"], ...reports.payrollRows.map((row) => [row.date, row.vaName, formatHours(row.totalSeconds), formatMoney(row.hourlyRate), formatMoney(row.earnings)])],
+      sheetName: "Payroll",
+    };
+  }
   return {
     filename: "thrivetracker-project-report.xlsx",
     rows: [["Project", "Total Hours", "Entries", "VAs"], ...reports.projectRows.map((row) => [row.projectName, formatHours(row.totalSeconds), row.entryCount, row.vaCount])],
@@ -415,6 +460,7 @@ function tabTitle(activeTab: ReportTab) {
   if (activeTab === "activity") return "Activity Report";
   if (activeTab === "apps") return "App Usage Report";
   if (activeTab === "attendance") return "Attendance Report";
+  if (activeTab === "payroll") return "Payroll Report";
   return "Project Report";
 }
 
@@ -427,9 +473,10 @@ function averageActivity(rows: ActivityReportRow[]) {
   return rows.reduce((sum, row) => sum + row.averageActivity, 0) / rows.length;
 }
 
-function toDateInputValue(date: Date): string {
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function sumPayroll(rows: PayrollReportRow[]) {
+  return rows.reduce((sum, row) => sum + row.earnings, 0);
+}
+
+function formatMoney(value: number) {
+  return `$${value.toFixed(2)}`;
 }

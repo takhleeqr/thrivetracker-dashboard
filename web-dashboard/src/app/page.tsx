@@ -3,12 +3,14 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, AlertTriangle, Clock3, Download, MonitorCheck, RefreshCw, UsersRound } from "lucide-react";
+import { Activity, AlertTriangle, CalendarDays, Clock3, DollarSign, Download, MonitorCheck, RefreshCw, UsersRound } from "lucide-react";
 import { Button, Card, Input, Select, Table, Tabs } from "@/components/ui";
 import type { DashboardAlert, DashboardRow, DashboardSummary, Profile } from "@/lib/dashboard-data";
 import { closeStaleTimeEntries, loadAdminProfile, loadDashboardSummary } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
+import { defaultSettings, loadSettings, type AppSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
+import { formatTime } from "@/lib/timezone";
 import { downloadXlsx } from "@/lib/xlsx-export";
 
 const navItems = [
@@ -22,6 +24,8 @@ const navItems = [
 
 const emptySummary: DashboardSummary = {
   totalHoursTodaySeconds: 0,
+  totalHoursWeekSeconds: 0,
+  totalEarningsToday: 0,
   onlineCount: 0,
   averageActivityPercent: 0,
   alertCount: 0,
@@ -33,12 +37,14 @@ export default function DashboardHome() {
   const router = useRouter();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
-  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "online" | "idle" | "offline" | "low">("active");
+  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "online" | "idle" | "offline" | "low" | "attention">("active");
   const [projectFilter, setProjectFilter] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [timezone, setTimezone] = useState("Asia/Karachi");
+  const [dashboardSettings, setDashboardSettings] = useState<AppSettings>(defaultSettings);
 
   useEffect(() => {
     let isMounted = true;
@@ -59,23 +65,29 @@ export default function DashboardHome() {
       }
 
       setAdmin(profile);
-      await refreshData();
+      const settings = await loadSettings(supabase);
+      setTimezone(settings.timezone);
+      setDashboardSettings(settings);
+      await refreshData(settings.timezone, settings);
     }
 
     boot();
-
-    const intervalId = window.setInterval(refreshData, 15_000);
     return () => {
       isMounted = false;
-      window.clearInterval(intervalId);
     };
   }, [router]);
 
-  async function refreshData() {
+  useEffect(() => {
+    if (!admin) return;
+    const intervalId = window.setInterval(() => refreshData(timezone, dashboardSettings), 15_000);
+    return () => window.clearInterval(intervalId);
+  }, [admin, dashboardSettings, timezone]);
+
+  async function refreshData(selectedTimezone = timezone, selectedSettings = dashboardSettings) {
     try {
       setError("");
       await closeStaleTimeEntries(supabase);
-      const nextSummary = await loadDashboardSummary(supabase);
+      const nextSummary = await loadDashboardSummary(supabase, selectedTimezone, selectedSettings);
       setSummary(nextSummary);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
@@ -93,11 +105,12 @@ export default function DashboardHome() {
   const visibleRows = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     return summary.rows.filter((row) => {
-      if (statusFilter === "active" && row.status === "offline") return false;
+      if (statusFilter === "active" && (row.status === "offline" || row.status === "day_off")) return false;
       if (statusFilter === "online" && row.status !== "online") return false;
       if (statusFilter === "idle" && row.status !== "idle") return false;
       if (statusFilter === "offline" && row.status !== "offline") return false;
       if (statusFilter === "low" && !row.alerts.some((alert) => alert.type === "low_activity")) return false;
+      if (statusFilter === "attention" && !row.alerts.length && row.scheduleStatus !== "late" && row.scheduleStatus !== "no_show") return false;
       if (projectFilter && row.currentProjectId !== projectFilter) return false;
       if (normalizedSearch && !`${row.name} ${row.email}`.toLowerCase().includes(normalizedSearch)) return false;
       return true;
@@ -113,11 +126,13 @@ export default function DashboardHome() {
   );
 
   const stats = [
-    { label: "Total Hours Today", value: formatHours(summary.totalHoursTodaySeconds), icon: Clock3 },
-    { label: "VAs Online", value: String(summary.onlineCount), icon: UsersRound },
-    { label: "Average Activity", value: formatPercent(summary.averageActivityPercent), icon: Activity },
-    { label: "Productivity Score", value: String(Math.round(summary.averageActivityPercent)), icon: MonitorCheck },
-    { label: "Alerts", value: String(summary.alertCount), icon: AlertTriangle },
+    { label: "Total Hours Today", value: formatHours(summary.totalHoursTodaySeconds), icon: Clock3, tone: "hours" },
+    { label: "Total Earnings Today", value: formatMoney(summary.totalEarningsToday), icon: DollarSign, tone: "earnings" },
+    { label: "Total Hours This Week", value: formatHours(summary.totalHoursWeekSeconds), icon: CalendarDays, tone: "hours" },
+    { label: "VAs Online", value: String(summary.onlineCount), icon: UsersRound, tone: "online" },
+    { label: "Average Activity", value: formatPercent(summary.averageActivityPercent), icon: Activity, tone: "activity" },
+    { label: "Productivity Score", value: String(Math.round(summary.averageActivityPercent)), icon: MonitorCheck, tone: "score" },
+    { label: "Alerts", value: String(summary.alertCount), icon: AlertTriangle, tone: "alerts" },
   ];
 
   return (
@@ -143,14 +158,14 @@ export default function DashboardHome() {
             <h2>Overview</h2>
             <p className="subtle-line">
               {admin ? admin.full_name : "Checking session"}
-              {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+              {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
             </p>
           </div>
           <div className="topbar-actions">
             <Select aria-label="Date range" defaultValue="today">
               <option value="today">Today</option>
             </Select>
-            <Button onClick={refreshData} type="button" variant="secondary">
+            <Button onClick={() => refreshData()} type="button" variant="secondary">
               <RefreshCw size={16} />
               Refresh
             </Button>
@@ -170,7 +185,7 @@ export default function DashboardHome() {
           {stats.map((stat) => {
             const Icon = stat.icon;
             return (
-              <Card className="stat-card" key={stat.label}>
+              <Card className={`stat-card stat-${stat.tone}`} key={stat.label}>
                 <div className="stat-icon">
                   <Icon size={18} />
                 </div>
@@ -180,6 +195,9 @@ export default function DashboardHome() {
             );
           })}
         </section>
+        <p className="metric-explainer">
+          Productivity Score is a 0-100 weighted activity score from today&apos;s keyboard and mouse activity across tracked sessions.
+        </p>
 
         <section className="work-area">
           <Card className="wide-card">
@@ -194,6 +212,9 @@ export default function DashboardHome() {
                 </button>
                 <button className={statusFilter === "all" ? "selected" : ""} onClick={() => setStatusFilter("all")}>
                   All
+                </button>
+                <button className={statusFilter === "attention" ? "selected attention-chip" : "attention-chip"} onClick={() => setStatusFilter("attention")}>
+                  Needs Attention
                 </button>
               </Tabs>
             </div>
@@ -213,6 +234,7 @@ export default function DashboardHome() {
                 <option value="online">Online</option>
                 <option value="idle">Idle</option>
                 <option value="offline">Offline</option>
+                <option value="attention">Needs Attention</option>
                 <option value="low">Low activity</option>
                 <option value="all">All</option>
               </Select>
@@ -222,11 +244,13 @@ export default function DashboardHome() {
                 <span>VA</span>
                 <span>Status</span>
                 <span>Project</span>
-                <span>Hours</span>
+                <span>Schedule</span>
+                <span>Hours Today</span>
+                <span>Earnings</span>
+                <span>Week</span>
                 <span>Activity</span>
-                <span>Score</span>
                 <span>Alerts</span>
-                <span>Last Shot</span>
+                <span>Last Screenshot</span>
               </div>
               {visibleRows.length ? (
                 visibleRows.map((row) => <VaRow key={row.userId} row={row} />)
@@ -253,12 +277,19 @@ function VaRow({ row }: { row: DashboardRow }) {
         <small>{row.email}</small>
       </span>
       <span>
-        <span className={`status-pill status-${row.status}`}>{row.status}</span>
+        <span className={`status-pill status-${row.status}`}>{statusLabel(row.status)}</span>
+      </span>
+      <span>
+        <span className={`schedule-pill schedule-${row.scheduleStatus}`}>{scheduleLabel(row.scheduleStatus)}</span>
       </span>
       <span>{row.currentProject}</span>
       <span>{formatHours(row.hoursTodaySeconds)}</span>
+      <span>{formatMoney(row.earningsToday)}</span>
+      <span>
+        {formatHours(row.weeklyHoursSeconds)}
+        {row.expectedWeekSeconds ? <small>/ {formatHours(row.expectedWeekSeconds)}</small> : null}
+      </span>
       <span>{row.activityPercent === null ? "-" : formatPercent(row.activityPercent)}</span>
-      <span>{row.productivityScore}</span>
       <span>{row.alerts.length ? <span className="alert-badge">{row.alerts.length}</span> : "-"}</span>
       <span>
         {row.lastScreenshot?.signedUrl ? (
@@ -297,13 +328,17 @@ function exportRows(rows: DashboardRow[]) {
     `thrivetracker-overview-${new Date().toISOString().slice(0, 10)}.xlsx`,
     "Overview",
     [
-      ["VA", "Email", "Status", "Project", "Hours Today", "Activity", "Productivity Score", "Alerts", "Last Screenshot", "Last Seen"],
+      ["VA", "Email", "Status", "Schedule", "Project", "Hours Today", "Earnings Today", "Weekly Hours", "Expected Weekly Hours", "Activity", "Productivity Score", "Alerts", "Last Screenshot", "Last Seen"],
       ...rows.map((row) => [
         row.name,
         row.email,
-        row.status,
+        statusLabel(row.status),
+        scheduleLabel(row.scheduleStatus),
         row.currentProject,
         formatHours(row.hoursTodaySeconds),
+        formatMoney(row.earningsToday),
+        formatHours(row.weeklyHoursSeconds),
+        row.expectedWeekSeconds ? formatHours(row.expectedWeekSeconds) : "",
         row.activityPercent === null ? "" : formatPercent(row.activityPercent),
         row.productivityScore,
         row.alerts.map((alert) => alert.title).join("; "),
@@ -312,4 +347,21 @@ function exportRows(rows: DashboardRow[]) {
       ]),
     ],
   );
+}
+
+function scheduleLabel(status: DashboardRow["scheduleStatus"]) {
+  if (status === "on_time") return "On Time";
+  if (status === "late") return "Late";
+  if (status === "no_show") return "No Show";
+  if (status === "day_off") return "Day Off";
+  return "Not Set";
+}
+
+function statusLabel(status: DashboardRow["status"]) {
+  if (status === "day_off") return "Day Off";
+  return status;
+}
+
+function formatMoney(value: number) {
+  return `$${value.toFixed(2)}`;
 }

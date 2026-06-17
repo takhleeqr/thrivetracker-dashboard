@@ -7,9 +7,14 @@ type VaPayload = {
   id?: string;
   fullName?: string;
   email?: string;
+  expectedHoursPerWeek?: string | number;
   password?: string;
+  hourlyRate?: string | number;
   isActive?: boolean;
+  workingDays?: string[];
 };
+
+const validWorkingDays = new Set(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
 
 export async function POST(request: NextRequest) {
   try {
@@ -39,9 +44,12 @@ export async function POST(request: NextRequest) {
 
     await upsertProfile({
       email,
+      expectedHoursPerWeek: numberFromPayload(payload.expectedHoursPerWeek, 0),
       fullName,
+      hourlyRate: numberFromPayload(payload.hourlyRate, 0),
       id: userId,
       isActive: payload.isActive ?? true,
+      workingDays: safeWorkingDays(payload.workingDays),
     });
     await syncAssignments(userId, payload.assignedProjectIds ?? []);
 
@@ -74,8 +82,11 @@ export async function PATCH(request: NextRequest) {
 
   await updateProfile(payload.id, {
     email,
+    expected_hours_per_week: numberFromPayload(payload.expectedHoursPerWeek, 0),
     full_name: fullName,
+    hourly_rate: numberFromPayload(payload.hourlyRate, 0),
     is_active: payload.isActive ?? true,
+    working_days: safeWorkingDays(payload.workingDays),
   });
   await syncAssignments(payload.id, payload.assignedProjectIds ?? []);
 
@@ -124,26 +135,48 @@ async function requireAdmin(request: NextRequest): Promise<NextResponse | null> 
   return null;
 }
 
-async function upsertProfile(input: { email: string; fullName: string; id: string; isActive: boolean }) {
+async function upsertProfile(input: {
+  email: string;
+  expectedHoursPerWeek: number;
+  fullName: string;
+  hourlyRate: number;
+  id: string;
+  isActive: boolean;
+  workingDays: string[];
+}) {
   await supabaseAdminFetch("/rest/v1/profiles?on_conflict=id", {
     body: JSON.stringify({
       email: input.email,
+      expected_hours_per_week: input.expectedHoursPerWeek,
       full_name: input.fullName,
+      hourly_rate: input.hourlyRate,
       id: input.id,
       is_active: input.isActive,
       role: "va",
+      working_days: input.workingDays,
     }),
     headers: { prefer: "resolution=merge-duplicates" },
     method: "POST",
   });
 }
 
-async function updateProfile(id: string, payload: Record<string, string | boolean>) {
+async function updateProfile(id: string, payload: Record<string, string | boolean | number | string[]>) {
   await supabaseAdminFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(id)}`, {
     body: JSON.stringify(payload),
     headers: { prefer: "return=minimal" },
     method: "PATCH",
   });
+}
+
+function numberFromPayload(value: string | number | undefined, fallback: number) {
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+}
+
+function safeWorkingDays(value: string[] | undefined) {
+  return [...new Set(value ?? [])].filter((day) => validWorkingDays.has(day));
 }
 
 async function syncAssignments(userId: string, assignedProjectIds: string[]) {

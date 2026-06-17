@@ -3,14 +3,32 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
-import { Activity, ArrowLeft, Camera, Clock3, Download, Monitor, RefreshCw, Rows3, TimerReset, X, type LucideIcon } from "lucide-react";
-import { Button, Card, Input, ModalFrame, Table, Tabs } from "@/components/ui";
+import { Activity, ArrowLeft, Camera, Clock3, Download, Monitor, Plus, RefreshCw, Rows3, TimerReset, X, type LucideIcon } from "lucide-react";
+import { Button, Card, Input, ModalFrame, Select, Table, Tabs } from "@/components/ui";
 import type { ActivityLog, DetailDateRange, Screenshot, TimelineSegment, VaDetail } from "@/lib/dashboard-data";
 import { closeStaleTimeEntries, loadAdminProfile, loadVaDetail } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
+import { loadSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
+import {
+  endOfDayIso,
+  formatDate,
+  formatDateTimeFull,
+  formatDateTime as formatInTimezone,
+  formatTime,
+  startOfDayIso,
+  todayDateInputValue,
+  zonedDateTimeToUtc,
+} from "@/lib/timezone";
 
 type RangeMode = "today" | "week" | "month" | "custom";
+type ManualEntryForm = {
+  date: string;
+  endTime: string;
+  note: string;
+  projectId: string;
+  startTime: string;
+};
 
 export default function VaDetailPage() {
   const router = useRouter();
@@ -21,13 +39,19 @@ export default function VaDetailPage() {
   const [error, setError] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [rangeMode, setRangeMode] = useState<RangeMode>("today");
-  const [customStart, setCustomStart] = useState(toDateInputValue(new Date()));
-  const [customEnd, setCustomEnd] = useState(toDateInputValue(new Date()));
+  const [timezone, setTimezone] = useState("Asia/Karachi");
+  const [customStart, setCustomStart] = useState(todayDateInputValue("Asia/Karachi"));
+  const [customEnd, setCustomEnd] = useState(todayDateInputValue("Asia/Karachi"));
   const [selectedScreenshot, setSelectedScreenshot] = useState<Screenshot | null>(null);
+  const [isManualModalOpen, setIsManualModalOpen] = useState(false);
+  const [manualForm, setManualForm] = useState<ManualEntryForm>(() => createManualEntryForm(todayDateInputValue("Asia/Karachi")));
+  const [manualError, setManualError] = useState("");
+  const [isSavingManual, setIsSavingManual] = useState(false);
+  const [unproductiveApps, setUnproductiveApps] = useState<string[]>([]);
 
   const selectedRange = useMemo(
-    () => buildDateRange(rangeMode, customStart, customEnd),
-    [rangeMode, customStart, customEnd],
+    () => buildDateRange(rangeMode, customStart, customEnd, timezone),
+    [rangeMode, customStart, customEnd, timezone],
   );
 
   useEffect(() => {
@@ -43,7 +67,10 @@ export default function VaDetailPage() {
         return;
       }
 
-      await refreshData(selectedRange);
+      const settings = await loadSettings(supabase);
+      setTimezone(settings.timezone);
+      setUnproductiveApps(parseUnproductiveApps(settings.app_categories_unproductive));
+      await refreshData(buildDateRange(rangeMode, customStart, customEnd, settings.timezone), settings.timezone);
     }
 
     boot();
@@ -55,11 +82,11 @@ export default function VaDetailPage() {
     };
   }, [router, selectedRange, userId]);
 
-  async function refreshData(range = selectedRange) {
+  async function refreshData(range = selectedRange, selectedTimezone = timezone) {
     try {
       setError("");
       await closeStaleTimeEntries(supabase);
-      const nextDetail = await loadVaDetail(supabase, userId, range);
+      const nextDetail = await loadVaDetail(supabase, userId, range, selectedTimezone);
       setDetail(nextDetail);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
@@ -67,6 +94,64 @@ export default function VaDetailPage() {
     } finally {
       setIsLoading(false);
     }
+  }
+
+  function openManualEntryModal() {
+    setManualError("");
+    setManualForm({
+      ...createManualEntryForm(todayDateInputValue(timezone)),
+      projectId: detail?.projectOptions[0]?.id ?? "",
+    });
+    setIsManualModalOpen(true);
+  }
+
+  async function saveManualEntry() {
+    if (!detail) return;
+
+    const note = manualForm.note.trim();
+    if (!manualForm.projectId) {
+      setManualError("Choose a project first.");
+      return;
+    }
+    if (!manualForm.date || !manualForm.startTime || !manualForm.endTime) {
+      setManualError("Enter the date, start time, and end time.");
+      return;
+    }
+    if (!note) {
+      setManualError("Add a short reason or note for this manual entry.");
+      return;
+    }
+
+    const startedAt = zonedDateTimeToUtc(manualForm.date, manualForm.startTime, timezone);
+    const stoppedAt = zonedDateTimeToUtc(manualForm.date, manualForm.endTime, timezone);
+    const durationSeconds = Math.floor((stoppedAt.getTime() - startedAt.getTime()) / 1000);
+
+    if (durationSeconds <= 0) {
+      setManualError("End time must be after start time on the same date.");
+      return;
+    }
+
+    setIsSavingManual(true);
+    setManualError("");
+    const { error: insertError } = await supabase.from("time_entries").insert({
+      duration_seconds: durationSeconds,
+      is_manual: true,
+      manual_note: note,
+      project_id: manualForm.projectId,
+      started_at: startedAt.toISOString(),
+      stop_reason: "manual",
+      stopped_at: stoppedAt.toISOString(),
+      user_id: userId,
+    });
+    setIsSavingManual(false);
+
+    if (insertError) {
+      setManualError(insertError.message);
+      return;
+    }
+
+    setIsManualModalOpen(false);
+    await refreshData();
   }
 
   const breaks = useMemo(() => buildBreaks(detail?.timeline ?? []), [detail?.timeline]);
@@ -96,14 +181,20 @@ export default function VaDetailPage() {
           <h1>{detail?.profile.full_name ?? "Virtual Assistant"}</h1>
           <p className="subtle-line">
             {detail?.profile.email}
-            {detail?.lastSeenAt ? `, last seen ${new Date(detail.lastSeenAt).toLocaleString()}` : ""}
-            {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+            {detail?.lastSeenAt ? `, last seen ${formatDateTimeFull(detail.lastSeenAt, timezone)}` : ""}
+            {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
           </p>
         </div>
-        <Button onClick={() => refreshData()} type="button" variant="secondary">
-          <RefreshCw size={16} />
-          Refresh
-        </Button>
+        <div className="topbar-actions">
+          <Button onClick={openManualEntryModal} type="button" variant="secondary">
+            <Plus size={16} />
+            Add Manual Entry
+          </Button>
+          <Button onClick={() => refreshData()} type="button" variant="secondary">
+            <RefreshCw size={16} />
+            Refresh
+          </Button>
+        </div>
       </header>
 
       <Card className="detail-card range-card">
@@ -122,7 +213,7 @@ export default function VaDetailPage() {
           </button>
         </Tabs>
         <div className="range-summary">
-          <strong>{rangeLabel(selectedRange)}</strong>
+          <strong>{rangeLabel(selectedRange, timezone)}</strong>
           {rangeMode === "custom" ? (
             <div className="custom-range-fields">
               <Input aria-label="Custom start date" onChange={(event) => setCustomStart(event.target.value)} type="date" value={customStart} />
@@ -137,40 +228,73 @@ export default function VaDetailPage() {
       {detail ? (
         <>
           <section className="stats-grid detail-stats" aria-label="VA stats">
-            <StatCard icon={Clock3} label="Hours Today" value={formatHours(detail.totalHoursTodaySeconds)} />
-            <StatCard icon={Activity} label="Productivity Score" value={String(detail.productivityScore)} />
-            <StatCard icon={Camera} label="Screenshots" value={String(detail.screenshotCount)} />
-            <StatCard icon={TimerReset} label="Break Time" value={formatHours(totalBreakSeconds)} />
+            <StatCard icon={Clock3} label="Hours Today" tone="hours" value={formatHours(detail.totalHoursTodaySeconds)} />
+            <StatCard icon={Activity} label="Productivity Score" tone="score" value={String(detail.productivityScore)} />
+            <StatCard icon={Camera} label="Screenshots" tone="screenshots" value={String(detail.screenshotCount)} />
+            <StatCard icon={TimerReset} label="Break Time" tone="activity" value={formatHours(totalBreakSeconds)} />
+            <StatCard icon={Clock3} label="Earnings This Week" tone="earnings" value={formatMoney(detail.earningsThisWeek)} />
+            <StatCard icon={Clock3} label="Earnings This Month" tone="earnings" value={formatMoney(detail.earningsThisMonth)} />
           </section>
+          <p className="metric-explainer">
+            Productivity Score is 0-100 and is calculated from this VA&apos;s activity percentages across tracked sessions today.
+          </p>
 
           <section className="detail-grid">
             <Card className="detail-card detail-main-card">
               <SectionTitle eyebrow="Today" title="Timeline" />
-              <Timeline rangeEnd={detail.rangeEnd} rangeStart={detail.rangeStart} segments={detail.timeline} />
-              <BreakList breaks={breaks} />
+              <Timeline rangeEnd={detail.rangeEnd} rangeStart={detail.rangeStart} segments={detail.timeline} timezone={timezone} />
+              <BreakList breaks={breaks} timezone={timezone} />
               <SectionTitle eyebrow="Activity" title="Minute Activity" />
-              <ActivityChart logs={detail.activityLogs} />
+              <ActivityChart logs={detail.activityLogs} timezone={timezone} />
             </Card>
 
             <Card className="detail-card">
               <SectionTitle eyebrow="Apps" title="Active Apps" />
               <div className="app-usage-list">
                 {detail.appUsage.length ? (
-                  detail.appUsage.map((app) => (
-                    <div className="app-usage-row" key={app.appName}>
-                      <span>
-                        <strong>{app.appName}</strong>
-                        <small>{app.minutes} min tracked</small>
-                      </span>
-                      <b>{formatPercent(app.averageActivityPercent)}</b>
-                    </div>
-                  ))
+                  detail.appUsage.map((app) => {
+                    const isUnproductive = appIsUnproductive(app.appName, unproductiveApps);
+                    return (
+                      <div className="app-usage-row" key={app.appName}>
+                        <span>
+                          <strong>
+                            {app.appName}
+                            {isUnproductive ? <b className="unproductive-badge">Unproductive</b> : null}
+                          </strong>
+                          <small>{app.minutes} min tracked</small>
+                        </span>
+                        <b>{formatPercent(app.averageActivityPercent)}</b>
+                      </div>
+                    );
+                  })
                 ) : (
                   <EmptySmall icon={Monitor} title="No app data yet" text="Activity logs will populate this section." />
                 )}
               </div>
             </Card>
           </section>
+
+          <Card className="detail-card">
+            <SectionTitle eyebrow="Payroll" title="Hours and Pay By Date" />
+            <Table className="compact-table">
+              <div className="table-row payroll-table-row table-head">
+                <span>Date</span>
+                <span>Hours Worked</span>
+                <span>Payable</span>
+              </div>
+              {detail.dailyPay.length ? (
+                detail.dailyPay.map((day) => (
+                  <div className="table-row data-row payroll-table-row" key={day.date}>
+                    <span>{day.date}</span>
+                    <span>{formatHours(day.seconds)}</span>
+                    <span>{formatMoney(day.earnings)}</span>
+                  </div>
+                ))
+              ) : (
+                <EmptySmall icon={Clock3} title="No payroll rows" text="Tracked or manual time entries create daily payroll rows." />
+              )}
+            </Table>
+          </Card>
 
           <section className="detail-grid detail-grid-wide">
             <Card className="detail-card">
@@ -184,12 +308,12 @@ export default function VaDetailPage() {
                     >
                       <button className="screenshot-open-button" disabled={!screenshot.signedUrl} onClick={() => setSelectedScreenshot(screenshot)} type="button">
                         {screenshot.signedUrl ? (
-                          <img alt={`Screenshot from ${new Date(screenshot.captured_at).toLocaleTimeString()}`} src={screenshot.signedUrl} />
+                          <img alt={`Screenshot from ${formatTime(screenshot.captured_at, timezone)}`} src={screenshot.signedUrl} />
                         ) : (
                           <div className="screenshot-missing">Signed URL unavailable</div>
                         )}
                         <span>
-                          <strong>{new Date(screenshot.captured_at).toLocaleTimeString()}</strong>
+                          <strong>{formatTime(screenshot.captured_at, timezone)}</strong>
                           <small>{screenshot.activity_percent_at_capture === null ? "Activity -" : formatPercent(screenshot.activity_percent_at_capture)}</small>
                         </span>
                       </button>
@@ -208,7 +332,16 @@ export default function VaDetailPage() {
             </Card>
 
             <Card className="detail-card">
-              <SectionTitle eyebrow="Time" title="Time Entries" />
+              <div className="section-heading">
+                <div>
+                  <p className="eyebrow">Time</p>
+                  <h3>Time Entries</h3>
+                </div>
+                <Button onClick={openManualEntryModal} type="button" variant="secondary">
+                  <Plus size={16} />
+                  Add Manual Entry
+                </Button>
+              </div>
               <Table className="compact-table">
                 <div className="table-row detail-table-head">
                   <span>Project</span>
@@ -221,10 +354,13 @@ export default function VaDetailPage() {
                   detail.timeEntries.map((entry) => (
                     <div className="table-row data-row detail-table-row" key={entry.id}>
                       <span>{entry.projectName}</span>
-                      <span>{formatDateTime(entry.started_at)}</span>
-                      <span>{entry.stopped_at ? formatDateTime(entry.stopped_at) : "Running"}</span>
+                      <span>{formatInTimezone(entry.started_at, timezone)}</span>
+                      <span>{entry.stopped_at ? formatInTimezone(entry.stopped_at, timezone) : "Running"}</span>
                       <span>{formatHours(entry.duration_seconds ?? runningDuration(entry.started_at, detail.lastSeenAt, detail.rangeEnd))}</span>
-                      <span>{entry.stop_reason ?? "running"}</span>
+                      <span>
+                        {entry.is_manual ? <b className="manual-badge">Manual</b> : null}
+                        {entry.manual_note ?? entry.stop_reason ?? "running"}
+                      </span>
                     </div>
                   ))
                 ) : (
@@ -233,16 +369,27 @@ export default function VaDetailPage() {
               </Table>
             </Card>
           </section>
-          {selectedScreenshot ? <ScreenshotLightbox screenshot={selectedScreenshot} onClose={() => setSelectedScreenshot(null)} /> : null}
+          {isManualModalOpen ? (
+            <ManualEntryModal
+              error={manualError}
+              form={manualForm}
+              isSaving={isSavingManual}
+              onCancel={() => setIsManualModalOpen(false)}
+              onChange={setManualForm}
+              onSave={saveManualEntry}
+              projects={detail.projectOptions}
+            />
+          ) : null}
+          {selectedScreenshot ? <ScreenshotLightbox screenshot={selectedScreenshot} onClose={() => setSelectedScreenshot(null)} timezone={timezone} /> : null}
         </>
       ) : null}
     </main>
   );
 }
 
-function StatCard({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
+function StatCard({ icon: Icon, label, tone, value }: { icon: LucideIcon; label: string; tone: string; value: string }) {
   return (
-    <Card className="stat-card">
+    <Card className={`stat-card stat-${tone}`}>
       <div className="stat-icon">
         <Icon size={18} />
       </div>
@@ -263,14 +410,100 @@ function SectionTitle({ eyebrow, title }: { eyebrow: string; title: string }) {
   );
 }
 
+function ManualEntryModal({
+  error,
+  form,
+  isSaving,
+  onCancel,
+  onChange,
+  onSave,
+  projects,
+}: {
+  error: string;
+  form: ManualEntryForm;
+  isSaving: boolean;
+  onCancel: () => void;
+  onChange: (form: ManualEntryForm) => void;
+  onSave: () => void;
+  projects: VaDetail["projectOptions"];
+}) {
+  return (
+    <div className="modal-backdrop">
+      <ModalFrame className="project-editor">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Manual Time</p>
+            <h3>Add Manual Entry</h3>
+            <p className="subtle-line">Use this only for approved corrections, missed starts, or verified offline work.</p>
+          </div>
+          <button className="modal-close" onClick={onCancel} type="button">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="editor-grid manual-entry-grid">
+          <label>
+            Project
+            <Select onChange={(event) => onChange({ ...form, projectId: event.target.value })} value={form.projectId}>
+              {projects.length ? (
+                projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))
+              ) : (
+                <option value="">No assigned projects</option>
+              )}
+            </Select>
+          </label>
+          <label>
+            Date
+            <Input onChange={(event) => onChange({ ...form, date: event.target.value })} type="date" value={form.date} />
+          </label>
+          <label>
+            Start Time
+            <Input onChange={(event) => onChange({ ...form, startTime: event.target.value })} type="time" value={form.startTime} />
+          </label>
+          <label>
+            End Time
+            <Input onChange={(event) => onChange({ ...form, endTime: event.target.value })} type="time" value={form.endTime} />
+          </label>
+          <label className="manual-note-field">
+            Reason / Note
+            <textarea
+              className="field field-textarea"
+              onChange={(event) => onChange({ ...form, note: event.target.value })}
+              placeholder="Example: Forgot to start timer after approved work call."
+              value={form.note}
+            />
+          </label>
+        </div>
+
+        {error ? <div className="toast manual-entry-error">{error}</div> : null}
+
+        <div className="modal-actions">
+          <Button onClick={onCancel} type="button" variant="secondary">
+            Cancel
+          </Button>
+          <Button disabled={isSaving || !projects.length} onClick={onSave} type="button">
+            {isSaving ? "Saving..." : "Save Manual Entry"}
+          </Button>
+        </div>
+      </ModalFrame>
+    </div>
+  );
+}
+
 function Timeline({
   rangeEnd,
   rangeStart,
   segments,
+  timezone,
 }: {
   rangeEnd: string;
   rangeStart: string;
   segments: TimelineSegment[];
+  timezone: string;
 }) {
   if (!segments.length) {
     return <EmptySmall icon={Rows3} title="No timeline yet" text="Time entries create the day timeline." />;
@@ -279,11 +512,11 @@ function Timeline({
   return (
     <div className="timeline">
       <div className="timeline-axis">
-        <span>{formatShortDateTime(rangeStart)}</span>
+        <span>{formatDate(rangeStart, timezone)}</span>
         <span>25%</span>
         <span>50%</span>
         <span>75%</span>
-        <span>{formatShortDateTime(rangeEnd)}</span>
+        <span>{formatDate(rangeEnd, timezone)}</span>
       </div>
       <div className="timeline-track">
         {segments.map((segment) => {
@@ -300,11 +533,14 @@ function Timeline({
       </div>
       <div className="timeline-list">
         {segments.map((segment) => (
-          <div className="timeline-list-row" key={segment.id}>
-            <span>
-              <strong>{segment.projectName}</strong>
+            <div className="timeline-list-row" key={segment.id}>
+              <span>
+              <strong>
+                {segment.projectName}
+                {segment.isManual ? <b className="manual-badge">Manual</b> : null}
+              </strong>
               <small>
-                {formatDateTime(segment.displayStartedAt)} - {segment.isOpen ? "Running" : formatDateTime(segment.displayStoppedAt)}
+                {formatInTimezone(segment.displayStartedAt, timezone)} - {segment.isOpen ? "Running" : formatInTimezone(segment.displayStoppedAt, timezone)}
               </small>
             </span>
             <b>{formatHours(segment.durationSeconds)}</b>
@@ -315,7 +551,7 @@ function Timeline({
   );
 }
 
-function ActivityChart({ logs }: { logs: ActivityLog[] }) {
+function ActivityChart({ logs, timezone }: { logs: ActivityLog[]; timezone: string }) {
   if (!logs.length) {
     return <EmptySmall icon={Activity} title="No activity logs yet" text="Minute activity appears while the desktop timer is running." />;
   }
@@ -329,14 +565,14 @@ function ActivityChart({ logs }: { logs: ActivityLog[] }) {
           className="activity-bar"
           key={log.id}
           style={{ height: `${Math.max(6, Number(log.activity_percent ?? 0))}%` }}
-          title={`${new Date(log.timestamp).toLocaleTimeString()}: ${formatPercent(log.activity_percent)}`}
+          title={`${formatTime(log.timestamp, timezone)}: ${formatPercent(log.activity_percent)}`}
         />
       ))}
     </div>
   );
 }
 
-function BreakList({ breaks }: { breaks: Array<{ durationSeconds: number; end: string; start: string }> }) {
+function BreakList({ breaks, timezone }: { breaks: Array<{ durationSeconds: number; end: string; start: string }>; timezone: string }) {
   if (!breaks.length) {
     return <p className="subtle-line">No breaks detected between sessions in this range.</p>;
   }
@@ -348,7 +584,7 @@ function BreakList({ breaks }: { breaks: Array<{ durationSeconds: number; end: s
           <span>
             <strong>Break</strong>
             <small>
-              {formatDateTime(item.start)} - {formatDateTime(item.end)}
+              {formatInTimezone(item.start, timezone)} - {formatInTimezone(item.end, timezone)}
             </small>
           </span>
           <b>{formatHours(item.durationSeconds)}</b>
@@ -368,14 +604,14 @@ function EmptySmall({ icon: Icon, title, text }: { icon: LucideIcon; title: stri
   );
 }
 
-function ScreenshotLightbox({ screenshot, onClose }: { screenshot: Screenshot; onClose: () => void }) {
+function ScreenshotLightbox({ screenshot, onClose, timezone }: { screenshot: Screenshot; onClose: () => void; timezone: string }) {
   return (
     <div className="modal-backdrop screenshot-lightbox-backdrop">
       <ModalFrame className="screenshot-lightbox">
         <div className="section-heading">
           <div>
             <p className="eyebrow">Screenshot</p>
-            <h3>{new Date(screenshot.captured_at).toLocaleString()}</h3>
+            <h3>{formatDateTimeFull(screenshot.captured_at, timezone)}</h3>
             <p className="subtle-line">
               {screenshot.activity_percent_at_capture === null ? "Activity -" : formatPercent(screenshot.activity_percent_at_capture)}
             </p>
@@ -472,41 +708,65 @@ function downloadScreenshot(url: string, storageKey: string) {
   link.click();
 }
 
-function buildDateRange(mode: RangeMode, customStart: string, customEnd: string): DetailDateRange {
-  const now = new Date();
-  const start = new Date(now);
-  const end = new Date(now);
+function buildDateRange(mode: RangeMode, customStart: string, customEnd: string, timezone: string): DetailDateRange {
+  const todayInput = todayDateInputValue(timezone);
+  let startInput = todayInput;
+  let endInput = todayInput;
 
   if (mode === "week") {
-    const day = start.getDay();
+    const startDate = dateFromInput(todayInput);
+    const day = startDate.getDay();
     const daysSinceMonday = (day + 6) % 7;
-    start.setDate(start.getDate() - daysSinceMonday);
+    startDate.setDate(startDate.getDate() - daysSinceMonday);
+    startInput = inputFromDate(startDate);
   }
 
   if (mode === "month") {
-    start.setDate(1);
+    const startDate = dateFromInput(todayInput);
+    startDate.setDate(1);
+    startInput = inputFromDate(startDate);
   }
 
   if (mode === "custom") {
-    const customStartDate = fromDateInputValue(customStart);
-    const customEndDate = fromDateInputValue(customEnd || customStart);
-    customEndDate.setHours(23, 59, 59, 999);
+    startInput = customStart;
+    endInput = customEnd || customStart;
     return {
-      start: customStartDate.toISOString(),
-      end: customEndDate.toISOString(),
+      start: startOfDayIso(startInput, timezone),
+      end: endOfDayIso(endInput, timezone),
     };
   }
 
-  start.setHours(0, 0, 0, 0);
-  end.setHours(23, 59, 59, 999);
-
   return {
-    start: start.toISOString(),
-    end: mode === "today" ? new Date().toISOString() : end.toISOString(),
+    start: startOfDayIso(startInput, timezone),
+    end: mode === "today" ? new Date().toISOString() : endOfDayIso(endInput, timezone),
   };
 }
 
-function fromDateInputValue(value: string): Date {
+function createManualEntryForm(date: string): ManualEntryForm {
+  return {
+    date,
+    endTime: "17:00",
+    note: "",
+    projectId: "",
+    startTime: "09:00",
+  };
+}
+
+function parseUnproductiveApps(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.map((item) => String(item).trim().toLowerCase()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+function appIsUnproductive(appName: string, unproductiveApps: string[]) {
+  const normalized = appName.toLowerCase();
+  return unproductiveApps.some((app) => normalized.includes(app));
+}
+
+function dateFromInput(value: string): Date {
   const [year, month, day] = value.split("-").map(Number);
   const date = new Date();
   date.setFullYear(year, month - 1, day);
@@ -514,29 +774,17 @@ function fromDateInputValue(value: string): Date {
   return date;
 }
 
-function toDateInputValue(date: Date): string {
+function inputFromDate(date: Date): string {
   const year = date.getFullYear();
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
   const day = `${date.getDate()}`.padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-function rangeLabel(range: DetailDateRange) {
-  return `${new Date(range.start).toLocaleDateString()} - ${new Date(range.end).toLocaleDateString()}`;
+function rangeLabel(range: DetailDateRange, timezone: string) {
+  return `${formatDate(range.start, timezone)} - ${formatDate(range.end, timezone)}`;
 }
 
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function formatShortDateTime(value: string) {
-  return new Date(value).toLocaleString([], {
-    month: "short",
-    day: "numeric",
-  });
+function formatMoney(value: number) {
+  return `$${value.toFixed(2)}`;
 }

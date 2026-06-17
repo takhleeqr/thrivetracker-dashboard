@@ -571,4 +571,14 @@ Done when: standalone per-company deployment is proven.
 - [x] Add RLS verification guide for admin/VA security checks.
 - [x] Add screenshot retention cleanup plan and local admin script.
 - [x] Add clean Windows desktop-agent install test guide.
+- [x] Add Chunk A migration for payroll, schedules, manual notes, alert settings, app categories, and timezone defaults.
+- [x] Build Chunk D foundation: full timezone selector, alert/app settings keys, and timezone-aware dashboard date display/ranges.
+- [x] Add Team payroll/schedule fields: hourly rate, expected weekly hours, and working days.
+- [x] Add VA earnings, daily hours/pay view, and payroll Excel report export.
+- [x] Add VA Detail manual time entry modal with manual labels in timeline/time table.
+- [x] Add Overview schedule status, day-off handling, earnings today, and weekly hours progress.
+- [x] Add productivity score explanations, semantic stat colors, unproductive app badges, and consecutive low-activity alerts.
+- [x] Add persisted dashboard alerts table and protected background recalculation API.
+- [x] Add Vercel Cron config and background alert deployment guide.
+- [x] Add Team Reactivate button for inactive VAs and Overview Needs Attention filter chip.
 - [ ] Start Phase 5.1 end-to-end testing.

@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { AppSettings } from "@/lib/settings-data";
+import { dateInputValue, formatTime, startOfDayIso, todayDateInputValue, zonedDateTimeToUtc } from "@/lib/timezone";
 
 export type Profile = {
   id: string;
@@ -7,10 +9,14 @@ export type Profile = {
   role: "admin" | "va";
   is_active: boolean;
   last_seen_at: string | null;
+  hourly_rate?: number;
+  expected_hours_per_week?: number;
+  working_days?: string[];
 };
 
 export type Project = {
   id: string;
+  is_active?: boolean;
   name: string;
 };
 
@@ -21,6 +27,8 @@ export type TimeEntry = {
   started_at: string;
   stopped_at: string | null;
   duration_seconds: number | null;
+  is_manual?: boolean;
+  manual_note?: string | null;
   stop_reason: "manual" | "idle" | "app_close" | "crash" | null;
 };
 
@@ -58,6 +66,7 @@ export type TimelineSegment = {
   displayStoppedAt: string;
   durationSeconds: number;
   stopReason: TimeEntry["stop_reason"];
+  isManual: boolean;
   isOpen: boolean;
 };
 
@@ -70,6 +79,10 @@ export type AppUsage = {
 export type VaDetail = {
   profile: Profile;
   totalHoursTodaySeconds: number;
+  totalHoursWeekSeconds: number;
+  totalHoursMonthSeconds: number;
+  earningsThisWeek: number;
+  earningsThisMonth: number;
   averageActivityPercent: number;
   productivityScore: number;
   screenshotCount: number;
@@ -78,6 +91,8 @@ export type VaDetail = {
   screenshots: Screenshot[];
   activityLogs: ActivityLog[];
   appUsage: AppUsage[];
+  dailyPay: Array<{ date: string; earnings: number; seconds: number }>;
+  projectOptions: Project[];
   timeEntries: Array<TimeEntry & { projectName: string }>;
   rangeStart: string;
   rangeEnd: string;
@@ -92,10 +107,14 @@ export type DashboardRow = {
   userId: string;
   name: string;
   email: string;
-  status: "online" | "idle" | "offline";
+  status: "online" | "idle" | "offline" | "day_off";
+  scheduleStatus: "on_time" | "late" | "no_show" | "day_off" | "not_set";
   currentProject: string;
   currentProjectId: string | null;
   hoursTodaySeconds: number;
+  weeklyHoursSeconds: number;
+  expectedWeekSeconds: number;
+  earningsToday: number;
   activityPercent: number | null;
   productivityScore: number;
   lastSeenAt: string | null;
@@ -111,13 +130,25 @@ export type DashboardAlert = {
   userId: string;
   vaName: string;
   severity: "warning" | "critical";
-  type: "low_activity" | "stale_heartbeat" | "missing_heartbeat" | "crash_closed";
+  type: "low_activity" | "stale_heartbeat" | "missing_heartbeat" | "crash_closed" | "late_start" | "no_show";
+  title: string;
+  message: string;
+};
+
+type PersistedDashboardAlert = {
+  alert_key: string;
+  user_id: string;
+  va_name: string;
+  severity: DashboardAlert["severity"];
+  type: DashboardAlert["type"];
   title: string;
   message: string;
 };
 
 export type DashboardSummary = {
   totalHoursTodaySeconds: number;
+  totalHoursWeekSeconds: number;
+  totalEarningsToday: number;
   onlineCount: number;
   averageActivityPercent: number;
   alertCount: number;
@@ -155,22 +186,28 @@ export async function loadAdminProfile(supabase: SupabaseClient): Promise<Profil
   return data as Profile;
 }
 
-export async function loadDashboardSummary(supabase: SupabaseClient): Promise<DashboardSummary> {
-  const todayStart = startOfTodayIso();
+export async function loadDashboardSummary(
+  supabase: SupabaseClient,
+  timezone = "Asia/Karachi",
+  settings?: Partial<Pick<AppSettings, "late_start_time" | "work_end_time" | "low_activity_threshold" | "low_activity_minimum_minutes">>,
+): Promise<DashboardSummary> {
+  const todayStart = startOfTodayIso(timezone);
+  const todayEnd = new Date().toISOString();
+  const weekStart = currentWeekRange(timezone).start;
   const activitySince = minutesAgoIso(RECENT_ACTIVITY_MINUTES);
 
-  const [profilesResult, projectsResult, entriesResult, activityResult, screenshotsResult] = await Promise.all([
+  const [profilesResult, projectsResult, entriesResult, activityResult, screenshotsResult, persistedAlertsResult] = await Promise.all([
     supabase
       .from("profiles")
-      .select("id,email,full_name,role,is_active,last_seen_at")
+      .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate,expected_hours_per_week,working_days")
       .eq("role", "va")
       .eq("is_active", true)
       .order("full_name", { ascending: true }),
     supabase.from("projects").select("id,name"),
     supabase
       .from("time_entries")
-      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,stop_reason")
-      .gte("started_at", todayStart),
+      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason")
+      .gte("started_at", weekStart),
     supabase
       .from("activity_logs")
       .select("id,user_id,time_entry_id,timestamp,activity_percent")
@@ -183,6 +220,10 @@ export async function loadDashboardSummary(supabase: SupabaseClient): Promise<Da
       .gte("captured_at", todayStart)
       .order("captured_at", { ascending: false })
       .limit(500),
+    supabase
+      .from("dashboard_alerts")
+      .select("alert_key,user_id,va_name,severity,type,title,message")
+      .eq("is_active", true),
   ]);
 
   if (profilesResult.error) throw profilesResult.error;
@@ -190,42 +231,70 @@ export async function loadDashboardSummary(supabase: SupabaseClient): Promise<Da
   if (entriesResult.error) throw entriesResult.error;
   if (activityResult.error) throw activityResult.error;
   if (screenshotsResult.error) throw screenshotsResult.error;
+  if (persistedAlertsResult.error && persistedAlertsResult.error.code !== "42P01") throw persistedAlertsResult.error;
 
   const profiles = (profilesResult.data ?? []) as Profile[];
   const projects = (projectsResult.data ?? []) as Project[];
   const entries = (entriesResult.data ?? []) as TimeEntry[];
   const activityLogs = (activityResult.data ?? []) as ActivityLog[];
   const screenshots = await addSignedScreenshotUrls(supabase, latestScreenshotPerUser((screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[]));
+  const persistedAlerts = ((persistedAlertsResult.data ?? []) as PersistedDashboardAlert[]).map((alert) => ({
+    id: alert.alert_key,
+    message: alert.message,
+    severity: alert.severity,
+    title: alert.title,
+    type: alert.type,
+    userId: alert.user_id,
+    vaName: alert.va_name,
+  }));
+  const persistedAlertsByUser = groupAlertsByUser(persistedAlerts);
   const screenshotsByUser = new Map(screenshots.map((screenshot) => [screenshot.user_id, screenshot]));
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
   const now = Date.now();
 
   const rows = profiles.map((profile) => {
     const userEntries = entries.filter((entry) => entry.user_id === profile.id);
+    const userTodayEntries = userEntries.filter((entry) => new Date(entry.started_at).getTime() >= new Date(todayStart).getTime());
     const activeEntry = userEntries.find((entry) => !entry.stopped_at) ?? null;
     const latestEntry = newestEntry(userEntries);
     const userLogs = activityLogs.filter((log) => log.user_id === profile.id);
     const latestLog = newestActivity(userLogs);
     const recentLogs = userLogs.filter((log) => new Date(log.timestamp).getTime() >= new Date(activitySince).getTime());
     const activityPercent = averageActivity(recentLogs) ?? latestLog?.activity_percent ?? null;
-    const status = getStatus(activeEntry, latestEntry, profile.last_seen_at, now);
-    const rowAlerts = buildDashboardAlerts({
+    const baseStatus = getStatus(activeEntry, latestEntry, profile.last_seen_at, now);
+    const status = getDisplayStatus(profile, activeEntry, userTodayEntries, baseStatus, timezone);
+    const scheduleStatus = getScheduleStatus(profile, userTodayEntries, timezone, settings?.late_start_time ?? "10:00", settings?.work_end_time ?? "17:00", now);
+    const hoursTodaySeconds = totalSecondsInRange(userEntries, { start: todayStart, end: todayEnd }, now, profile.last_seen_at, status);
+    const weeklyHoursSeconds = totalSecondsInRange(userEntries, currentWeekRange(timezone), now, profile.last_seen_at, status);
+    const hourlyRate = Number(profile.hourly_rate ?? 0);
+    const lowActivityThreshold = Number(settings?.low_activity_threshold ?? LOW_ACTIVITY_THRESHOLD);
+    const calculatedAlerts = buildDashboardAlerts({
       activeEntry,
       activityPercent,
       latestEntry,
+      lowActivityMinimumMinutes: Number((settings as Partial<AppSettings> | undefined)?.low_activity_minimum_minutes ?? "15"),
+      lowActivityStreakMinutes: lowActivityStreakMinutes(userLogs, lowActivityThreshold),
       now,
       profile,
+      scheduleStatus,
       status,
+      threshold: lowActivityThreshold,
+      timezone,
     });
+    const rowAlerts = mergeAlerts(calculatedAlerts, persistedAlertsByUser.get(profile.id) ?? []);
 
     return {
       userId: profile.id,
       name: profile.full_name,
       email: profile.email,
       status,
+      scheduleStatus,
       currentProject: activeEntry?.project_id ? projectNames.get(activeEntry.project_id) ?? "Assigned Project" : "-",
       currentProjectId: activeEntry?.project_id ?? null,
-      hoursTodaySeconds: totalSecondsToday(userEntries, now, profile.last_seen_at, status),
+      hoursTodaySeconds,
+      weeklyHoursSeconds,
+      expectedWeekSeconds: Math.round(Number(profile.expected_hours_per_week ?? 0) * 3600),
+      earningsToday: earningsForSeconds(hoursTodaySeconds, hourlyRate),
       activityPercent,
       productivityScore: productivityScore(activityPercent),
       lastSeenAt: profile.last_seen_at ?? latestLog?.timestamp ?? latestEntry?.stopped_at ?? latestEntry?.started_at ?? null,
@@ -240,6 +309,8 @@ export async function loadDashboardSummary(supabase: SupabaseClient): Promise<Da
   });
 
   const totalHoursTodaySeconds = rows.reduce((sum, row) => sum + row.hoursTodaySeconds, 0);
+  const totalHoursWeekSeconds = rows.reduce((sum, row) => sum + row.weeklyHoursSeconds, 0);
+  const totalEarningsToday = rows.reduce((sum, row) => sum + row.earningsToday, 0);
   const onlineRows = rows.filter((row) => row.status === "online");
   const averageActivityPercent = averageActivity(
     rows
@@ -250,6 +321,8 @@ export async function loadDashboardSummary(supabase: SupabaseClient): Promise<Da
 
   return {
     totalHoursTodaySeconds,
+    totalHoursWeekSeconds,
+    totalEarningsToday,
     onlineCount: onlineRows.length,
     averageActivityPercent,
     alertCount: alerts.length,
@@ -267,17 +340,18 @@ export async function closeStaleTimeEntries(supabase: SupabaseClient): Promise<n
   return Number(data ?? 0);
 }
 
-export async function loadVaDetail(supabase: SupabaseClient, userId: string, range?: DetailDateRange): Promise<VaDetail> {
-  const selectedRange = range ?? { start: startOfTodayIso(), end: new Date().toISOString() };
+export async function loadVaDetail(supabase: SupabaseClient, userId: string, range?: DetailDateRange, timezone = "Asia/Karachi"): Promise<VaDetail> {
+  const selectedRange = range ?? { start: startOfTodayIso(timezone), end: new Date().toISOString() };
 
-  const [profileResult, projectsResult, entriesResult, activityResult, screenshotsResult] = await Promise.all([
+  const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id,email,full_name,role,is_active,last_seen_at")
       .eq("id", userId)
       .eq("role", "va")
       .maybeSingle(),
-    supabase.from("projects").select("id,name"),
+    supabase.from("projects").select("id,name,is_active"),
+    supabase.from("project_assignments").select("project_id").eq("user_id", userId),
     supabase
       .from("time_entries")
       .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,stop_reason")
@@ -307,6 +381,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
 
   if (profileResult.error) throw profileResult.error;
   if (projectsResult.error) throw projectsResult.error;
+  if (assignmentsResult.error) throw assignmentsResult.error;
   if (entriesResult.error) throw entriesResult.error;
   if (activityResult.error) throw activityResult.error;
   if (screenshotsResult.error) throw screenshotsResult.error;
@@ -314,6 +389,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
 
   const profile = profileResult.data as Profile;
   const projects = (projectsResult.data ?? []) as Project[];
+  const assignedProjectIds = new Set((assignmentsResult.data ?? []).map((assignment) => assignment.project_id as string));
   const entries = (entriesResult.data ?? []) as TimeEntry[];
   const activityLogs = (activityResult.data ?? []) as ActivityLog[];
   const screenshots = await addSignedScreenshotUrls(supabase, (screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[]);
@@ -321,10 +397,19 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   const activeEntry = entries.find((entry) => !entry.stopped_at) ?? null;
   const latestEntry = newestEntry(entries);
   const status = getStatus(activeEntry, latestEntry, profile.last_seen_at, Date.now());
+  const hourlyRate = Number(profile.hourly_rate ?? 0);
+  const weekRange = currentWeekRange(timezone);
+  const monthRange = currentMonthRange(timezone);
+  const weekSeconds = totalSecondsInRange(entries, weekRange, Date.now(), profile.last_seen_at, status);
+  const monthSeconds = totalSecondsInRange(entries, monthRange, Date.now(), profile.last_seen_at, status);
 
   return {
     profile,
     totalHoursTodaySeconds: totalSecondsInRange(entries, selectedRange, Date.now(), profile.last_seen_at, status),
+    totalHoursWeekSeconds: weekSeconds,
+    totalHoursMonthSeconds: monthSeconds,
+    earningsThisWeek: earningsForSeconds(weekSeconds, hourlyRate),
+    earningsThisMonth: earningsForSeconds(monthSeconds, hourlyRate),
     averageActivityPercent: averageActivity(activityLogs) ?? 0,
     productivityScore: productivityScore(averageActivity(activityLogs) ?? 0),
     screenshotCount: screenshots.length,
@@ -333,6 +418,10 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
     screenshots,
     activityLogs,
     appUsage: buildAppUsage(activityLogs),
+    dailyPay: buildDailyPay(entries, selectedRange, timezone, hourlyRate),
+    projectOptions: projects
+      .filter((project) => project.is_active !== false && assignedProjectIds.has(project.id))
+      .sort((first, second) => first.name.localeCompare(second.name)),
     timeEntries: entries.map((entry) => ({
       ...entry,
       projectName: entry.project_id ? projectNames.get(entry.project_id) ?? "Assigned Project" : "-",
@@ -342,10 +431,29 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   };
 }
 
-function startOfTodayIso(): string {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  return date.toISOString();
+function currentWeekRange(timezone: string): DetailDateRange {
+  const todayInput = todayDateInputValue(timezone);
+  const startDate = dateFromInput(todayInput);
+  const daysSinceMonday = (startDate.getDay() + 6) % 7;
+  startDate.setDate(startDate.getDate() - daysSinceMonday);
+  return {
+    start: startOfDayIso(inputFromDate(startDate), timezone),
+    end: new Date().toISOString(),
+  };
+}
+
+function currentMonthRange(timezone: string): DetailDateRange {
+  const todayInput = todayDateInputValue(timezone);
+  const startDate = dateFromInput(todayInput);
+  startDate.setDate(1);
+  return {
+    start: startOfDayIso(inputFromDate(startDate), timezone),
+    end: new Date().toISOString(),
+  };
+}
+
+function startOfTodayIso(timezone: string): string {
+  return startOfDayIso(todayDateInputValue(timezone), timezone);
 }
 
 function minutesAgoIso(minutes: number): string {
@@ -358,6 +466,57 @@ function newestEntry(entries: TimeEntry[]): TimeEntry | null {
 
 function newestActivity(logs: ActivityLog[]): ActivityLog | null {
   return [...logs].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0] ?? null;
+}
+
+function getDisplayStatus(
+  profile: Profile,
+  activeEntry: TimeEntry | null,
+  todayEntries: TimeEntry[],
+  baseStatus: DashboardRow["status"],
+  timezone: string,
+): DashboardRow["status"] {
+  const workingDays = profile.working_days ?? [];
+  if (workingDays.length && !workingDays.includes(weekdayKey(new Date(), timezone))) {
+    return "day_off";
+  }
+
+  if (activeEntry && baseStatus === "online") return "online";
+  if (todayEntries.length) return "idle";
+  return "offline";
+}
+
+function getScheduleStatus(
+  profile: Profile,
+  todayEntries: TimeEntry[],
+  timezone: string,
+  lateStartTime: string,
+  workEndTime: string,
+  now: number,
+): DashboardRow["scheduleStatus"] {
+  const workingDays = profile.working_days ?? [];
+  if (!workingDays.length) return "not_set";
+  if (!workingDays.includes(weekdayKey(new Date(), timezone))) return "day_off";
+
+  const todayInput = todayDateInputValue(timezone);
+  const lateStartAt = zonedDateTimeToUtc(todayInput, safeTime(lateStartTime, "10:00"), timezone).getTime();
+  const workEndAt = zonedDateTimeToUtc(todayInput, safeTime(workEndTime, "17:00"), timezone).getTime();
+  const firstEntry = [...todayEntries].sort((first, second) => new Date(first.started_at).getTime() - new Date(second.started_at).getTime())[0];
+
+  if (firstEntry) {
+    return new Date(firstEntry.started_at).getTime() <= lateStartAt ? "on_time" : "late";
+  }
+
+  if (now >= workEndAt) return "no_show";
+  if (now >= lateStartAt) return "late";
+  return "on_time";
+}
+
+function weekdayKey(value: Date, timezone: string) {
+  return new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(value).toLowerCase().slice(0, 3);
+}
+
+function safeTime(value: string | undefined, fallback: string) {
+  return /^\d{2}:\d{2}$/.test(value ?? "") ? value! : fallback;
 }
 
 function totalSecondsToday(
@@ -401,9 +560,66 @@ function totalSecondsInRange(
   }, 0);
 }
 
+function buildDailyPay(entries: TimeEntry[], range: DetailDateRange, timezone: string, hourlyRate: number) {
+  const rows = new Map<string, number>();
+  const rangeStart = new Date(range.start).getTime();
+  const rangeEnd = new Date(range.end).getTime();
+
+  for (const entry of entries) {
+    const entryStart = new Date(entry.started_at).getTime();
+    const entryEnd = new Date(entry.stopped_at ?? entry.started_at).getTime();
+    const clampedStart = Math.max(entryStart, rangeStart);
+    const clampedEnd = Math.min(entryEnd, rangeEnd);
+    const seconds = Math.max(0, Math.floor((clampedEnd - clampedStart) / 1000));
+    if (!seconds) continue;
+
+    const dateKey = dateInputValue(new Date(clampedStart), timezone);
+    rows.set(dateKey, (rows.get(dateKey) ?? 0) + seconds);
+  }
+
+  return [...rows.entries()]
+    .sort(([first], [second]) => first.localeCompare(second))
+    .map(([date, seconds]) => ({
+      date,
+      earnings: earningsForSeconds(seconds, hourlyRate),
+      seconds,
+    }));
+}
+
+function earningsForSeconds(seconds: number, hourlyRate: number) {
+  return Number(((seconds / 3600) * hourlyRate).toFixed(2));
+}
+
+function dateFromInput(value: string): Date {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date();
+  date.setFullYear(year, month - 1, day);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function inputFromDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function averageActivity(logs: Array<Pick<ActivityLog, "activity_percent">>): number | null {
   if (!logs.length) return null;
   return logs.reduce((sum, log) => sum + Number(log.activity_percent ?? 0), 0) / logs.length;
+}
+
+function lowActivityStreakMinutes(logs: ActivityLog[], threshold: number): number {
+  const sortedLogs = [...logs].sort((first, second) => new Date(second.timestamp).getTime() - new Date(first.timestamp).getTime());
+  let minutes = 0;
+
+  for (const log of sortedLogs) {
+    if (Number(log.activity_percent ?? 0) >= threshold) break;
+    minutes += 1;
+  }
+
+  return minutes;
 }
 
 function productivityScore(activityPercent: number | null): number {
@@ -424,25 +640,55 @@ function latestScreenshotPerUser(screenshots: Array<Omit<Screenshot, "signedUrl"
   return [...latestByUser.values()];
 }
 
+function groupAlertsByUser(alerts: DashboardAlert[]) {
+  const grouped = new Map<string, DashboardAlert[]>();
+  for (const alert of alerts) {
+    grouped.set(alert.userId, [...(grouped.get(alert.userId) ?? []), alert]);
+  }
+  return grouped;
+}
+
+function mergeAlerts(calculatedAlerts: DashboardAlert[], persistedAlerts: DashboardAlert[]) {
+  const merged = new Map<string, DashboardAlert>();
+  for (const alert of [...persistedAlerts, ...calculatedAlerts]) {
+    merged.set(alert.id, alert);
+  }
+  return [...merged.values()].sort((first, second) => severityRank(second.severity) - severityRank(first.severity));
+}
+
+function severityRank(severity: DashboardAlert["severity"]) {
+  return severity === "critical" ? 2 : 1;
+}
+
 function buildDashboardAlerts({
   activeEntry,
   activityPercent,
   latestEntry,
+  lowActivityMinimumMinutes,
+  lowActivityStreakMinutes,
   now,
   profile,
+  scheduleStatus,
   status,
+  threshold,
+  timezone,
 }: {
   activeEntry: TimeEntry | null;
   activityPercent: number | null;
   latestEntry: TimeEntry | null;
+  lowActivityMinimumMinutes: number;
+  lowActivityStreakMinutes: number;
   now: number;
   profile: Profile;
+  scheduleStatus: DashboardRow["scheduleStatus"];
   status: DashboardRow["status"];
+  threshold: number;
+  timezone: string;
 }): DashboardAlert[] {
   const alerts: DashboardAlert[] = [];
   const lastSeenAgeMinutes = profile.last_seen_at ? (now - new Date(profile.last_seen_at).getTime()) / 60000 : null;
 
-  if (status === "online" && activityPercent !== null && activityPercent < LOW_ACTIVITY_THRESHOLD) {
+  if (status === "online" && activityPercent !== null && lowActivityStreakMinutes >= lowActivityMinimumMinutes) {
     alerts.push({
       id: `${profile.id}-low-activity`,
       userId: profile.id,
@@ -450,7 +696,31 @@ function buildDashboardAlerts({
       severity: "warning",
       type: "low_activity",
       title: "Low activity",
-      message: `${Math.round(activityPercent)}% activity in the recent tracking window.`,
+      message: `${Math.round(activityPercent)}% recent activity after ${lowActivityStreakMinutes}+ low-activity minutes.`,
+    });
+  }
+
+  if (scheduleStatus === "late") {
+    alerts.push({
+      id: `${profile.id}-late-start`,
+      userId: profile.id,
+      vaName: profile.full_name,
+      severity: "warning",
+      type: "late_start",
+      title: "Late start",
+      message: "Scheduled VA has not started on time today.",
+    });
+  }
+
+  if (scheduleStatus === "no_show") {
+    alerts.push({
+      id: `${profile.id}-no-show`,
+      userId: profile.id,
+      vaName: profile.full_name,
+      severity: "critical",
+      type: "no_show",
+      title: "No show",
+      message: "Scheduled VA did not track any time today.",
     });
   }
 
@@ -478,7 +748,7 @@ function buildDashboardAlerts({
     });
   }
 
-  if (latestEntry?.stop_reason === "crash" && latestEntry.stopped_at && new Date(latestEntry.stopped_at).getTime() >= new Date(startOfTodayIso()).getTime()) {
+  if (latestEntry?.stop_reason === "crash" && latestEntry.stopped_at && new Date(latestEntry.stopped_at).getTime() >= new Date(startOfTodayIso(timezone)).getTime()) {
     alerts.push({
       id: `${profile.id}-crash-closed-${latestEntry.id}`,
       userId: profile.id,
@@ -486,7 +756,7 @@ function buildDashboardAlerts({
       severity: "critical",
       type: "crash_closed",
       title: "Session auto-closed",
-      message: `A stale open timer was closed as a crash at ${new Date(latestEntry.stopped_at).toLocaleTimeString()}.`,
+      message: `A stale open timer was closed as a crash at ${formatTime(latestEntry.stopped_at, timezone)}.`,
     });
   }
 
@@ -536,6 +806,7 @@ function toTimelineSegment(
     displayStoppedAt: endAt,
     durationSeconds,
     stopReason: entry.stop_reason,
+    isManual: Boolean(entry.is_manual),
     isOpen: !entry.stopped_at,
   };
 }

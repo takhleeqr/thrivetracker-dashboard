@@ -7,6 +7,7 @@ import { Edit3, FolderKanban, Plus, RefreshCw, Trash2, UsersRound, type LucideIc
 import { Button, Card, Input, ModalFrame, Table, Tabs } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatHours } from "@/lib/format";
+import { loadSettings } from "@/lib/settings-data";
 import {
   deactivateProject,
   loadProjectsManagement,
@@ -16,6 +17,7 @@ import {
   type VaOption,
 } from "@/lib/projects-data";
 import { supabase } from "@/lib/supabase";
+import { formatDateTimeFull, formatTime } from "@/lib/timezone";
 
 const colorChoices = ["#2563EB", "#16A34A", "#D97706", "#DC2626", "#7C3AED", "#0F766E"];
 const navItems = [
@@ -46,6 +48,7 @@ export default function ProjectsPage() {
   const [error, setError] = useState("");
   const [form, setForm] = useState<ProjectFormInput | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
+  const [timezone, setTimezone] = useState("Asia/Karachi");
 
   useEffect(() => {
     let isMounted = true;
@@ -61,6 +64,8 @@ export default function ProjectsPage() {
       }
 
       setAdmin(profile);
+      const settings = await loadSettings(supabase);
+      setTimezone(settings.timezone);
       await refreshData();
     }
 
@@ -141,7 +146,7 @@ export default function ProjectsPage() {
             <h2>Projects</h2>
             <p className="subtle-line">
               {admin ? admin.full_name : "Checking session"}
-              {lastUpdatedAt ? `, updated ${lastUpdatedAt.toLocaleTimeString()}` : ""}
+              {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
             </p>
           </div>
           <div className="topbar-actions">
@@ -203,7 +208,7 @@ export default function ProjectsPage() {
                     </span>
                     <span>{project.assignedNames.length ? project.assignedNames.join(", ") : "Unassigned"}</span>
                     <span>{formatHours(project.totalHoursSeconds)}</span>
-                    <span>{project.lastActivityAt ? new Date(project.lastActivityAt).toLocaleString() : "-"}</span>
+                    <span>{formatDateTimeFull(project.lastActivityAt, timezone)}</span>
                     <span>
                       <span className={`status-pill ${project.is_active ? "status-online" : "status-offline"}`}>
                         {project.is_active ? "active" : "inactive"}
