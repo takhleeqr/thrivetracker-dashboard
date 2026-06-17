@@ -500,8 +500,8 @@ Done when: the product is usable for real daily work.
 - [ ] Confirm Supabase URL/key setup.
 - [ ] Confirm Supabase Storage access from production server routes.
 - [ ] Package desktop agent with production config flow.
-- [ ] Create admin setup documentation.
-- [ ] Create VA install documentation.
+- [x] Create admin setup documentation.
+- [x] Create VA install documentation.
 
 Done when: first company can use the product outside the dev machine.
 
@@ -581,4 +581,5 @@ Done when: standalone per-company deployment is proven.
 - [x] Add persisted dashboard alerts table and protected background recalculation API.
 - [x] Add Vercel Cron config and background alert deployment guide.
 - [x] Add Team Reactivate button for inactive VAs and Overview Needs Attention filter chip.
+- [x] Add production deployment guide and production verification checklist.
 - [ ] Start Phase 5.1 end-to-end testing.
