@@ -1,0 +1,425 @@
+Build a VA (Virtual Assistant) Time Tracking & Monitoring System
+Overview
+Build a complete VA monitoring system similar to Hubstaff but simpler. It has TWO components:
+
+Desktop Agent — A Windows app that VAs download and install. It tracks their work.
+Web Dashboard — A website the admin uses to monitor all VAs.
+Each company gets its own completely separate instance (separate Supabase project, separate database, separate users). There is no multi-company picker — each company is a standalone deployment.
+
+Tech Stack (MUST USE THESE)
+Desktop Agent: Python 3.11+, packaged as .exe using PyInstaller
+mss — for fast screenshot capture
+pynput — for keyboard and mouse activity tracking
+pygetwindow — for active window title detection
+Pillow — for image compression (JPEG)
+requests or httpx — for API calls
+tkinter — for the simple GUI (login window, timer controls, system tray)
+pystray — for system tray icon
+Backend + Database + Auth: Supabase (free tier)
+PostgreSQL database
+Supabase Auth for user login (admin + VA accounts)
+Supabase REST API for data operations
+Row Level Security (RLS) policies for data isolation
+Screenshot Storage: Cloudflare R2 (free tier, S3-compatible)
+Store screenshots as JPEG files
+Organize by: /{user_id}/{YYYY-MM-DD}/{timestamp}.jpg
+Web Dashboard: Next.js (React) deployed on Vercel (free tier)
+Or alternatively: plain HTML/CSS/JavaScript deployed on Cloudflare Pages
+Use Supabase JS client library for auth and data
+Database Schema (Supabase PostgreSQL)
+sql
+
+
+-- Users table (extends Supabase auth.users)
+CREATE TABLE public.profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'va')),
+  is_active BOOLEAN DEFAULT true,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+-- Projects
+CREATE TABLE public.projects (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  description TEXT,
+  color TEXT DEFAULT '#3B82F6',
+  is_active BOOLEAN DEFAULT true,
+  created_by UUID REFERENCES public.profiles(id),
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+-- Project Assignments (which VAs are assigned to which projects)
+CREATE TABLE public.project_assignments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES public.projects(id) ON DELETE CASCADE,
+  assigned_at TIMESTAMPTZ DEFAULT NOW(),
+  UNIQUE(user_id, project_id)
+);
+-- Time Entries (start/stop work sessions)
+CREATE TABLE public.time_entries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES public.projects(id),
+  started_at TIMESTAMPTZ NOT NULL,
+  stopped_at TIMESTAMPTZ,
+  duration_seconds INTEGER,
+  is_manual BOOLEAN DEFAULT false,
+  stop_reason TEXT CHECK (stop_reason IN ('manual', 'idle', 'app_close', NULL)),
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+-- Activity Logs (periodic activity snapshots, every 1 minute)
+CREATE TABLE public.activity_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  time_entry_id UUID REFERENCES public.time_entries(id) ON DELETE CASCADE,
+  timestamp TIMESTAMPTZ NOT NULL,
+  keystrokes_count INTEGER DEFAULT 0,
+  mouse_clicks_count INTEGER DEFAULT 0,
+  mouse_moved BOOLEAN DEFAULT false,
+  activity_percent REAL DEFAULT 0,
+  active_window_title TEXT,
+  active_app_name TEXT
+);
+-- Screenshots
+CREATE TABLE public.screenshots (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  time_entry_id UUID REFERENCES public.time_entries(id) ON DELETE CASCADE,
+  project_id UUID REFERENCES public.projects(id),
+  captured_at TIMESTAMPTZ NOT NULL,
+  storage_url TEXT NOT NULL,
+  storage_key TEXT NOT NULL,
+  file_size_bytes INTEGER,
+  activity_percent_at_capture REAL
+);
+-- Settings (admin-configurable)
+CREATE TABLE public.settings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT UNIQUE NOT NULL,
+  value TEXT NOT NULL,
+  description TEXT,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+-- Default settings to insert
+INSERT INTO public.settings (key, value, description) VALUES
+  ('screenshot_interval_minutes', '5', 'Minutes between screenshot captures'),
+  ('screenshot_quality', '60', 'JPEG quality 1-100'),
+  ('idle_timeout_minutes', '5', 'Minutes of no activity before auto-pause'),
+  ('low_activity_threshold', '30', 'Activity % below this triggers alert'),
+  ('data_retention_days', '90', 'Auto-delete screenshots older than this'),
+  ('work_start_time', '09:00', 'Expected work start time'),
+  ('work_end_time', '17:00', 'Expected work end time'),
+  ('max_screenshots_per_day', '200', 'Safety cap per VA per day'),
+  ('timezone', 'UTC', 'Company timezone for reports');
+Set up Row Level Security (RLS) policies so:
+
+Admins can read/write all data
+VAs can only read their own profile, their assigned projects, and insert their own time entries, activity logs, and screenshots
+VAs cannot see other VAs' data
+Desktop Agent (Python) — Detailed Specification
+GUI (tkinter)
+The agent has a simple, small window (400x300px) with:
+
+Login Screen (shown first):
+
+Server URL field (Supabase project URL)
+Email field
+Password field
+"Login" button
+"Remember me" checkbox (saves credentials locally in encrypted form)
+Error display area
+Main Screen (after login):
+
+VA's name shown at top
+Project dropdown (populated from their assigned projects via API)
+Large "▶ Start" button (green) / "⏹ Stop" button (red) — toggles
+Timer display: "02:34:15" (hours:minutes:seconds, counting up while running)
+Today's total hours: "5h 23m"
+Status line: "🟢 Recording..." or "🟡 Idle — paused" or "⚪ Stopped"
+"Minimize to tray" button
+System tray icon with right-click menu: Start/Stop, Show Window, Quit
+Screenshot Capture Logic
+
+
+When timer is running:
+  Every [screenshot_interval_minutes] minutes:
+    1. Capture all monitors using mss library
+    2. Combine into single image if multi-monitor
+    3. Compress to JPEG at [screenshot_quality]%
+    4. Calculate file size
+    5. Upload to Cloudflare R2: /{user_id}/{YYYY-MM-DD}/{HH-MM-SS}.jpg
+    6. Save record to screenshots table via Supabase API
+    7. If upload fails (no internet), queue locally and retry later
+Activity Tracking Logic
+
+
+Continuously while timer is running:
+  Track keyboard:
+    - Count every key press (just the count, NOT which key)
+    - Reset count every 60 seconds
+  Track mouse:
+    - Count every click (left, right, middle)
+    - Track if mouse is moving (boolean, sampled every second)
+    - Reset count every 60 seconds
+  
+  Every 60 seconds:
+    - Calculate activity_percent for this minute:
+      - Divide the minute into 6 x 10-second slots
+      - If there was ANY keyboard or mouse activity in a slot, it's "active"
+      - activity_percent = (active_slots / 6) * 100
+    - Get active window title using pygetwindow
+    - Extract app name from window title
+    - Upload activity_log record to Supabase
+Idle Detection Logic
+
+
+Continuously while timer is running:
+  Track time since last keyboard OR mouse input
+  If no input for [idle_timeout_minutes] minutes:
+    1. Auto-pause the timer
+    2. Update status to "Idle — paused"
+    3. Mark the time entry's stop_reason as 'idle'
+    4. Stop taking screenshots
+    5. When user returns (any keyboard/mouse input detected):
+       - Show popup: "You were idle for X minutes. Resume timer?"
+       - If yes: create new time_entry, resume tracking
+       - If no: keep timer stopped
+Offline Queue
+
+
+If any upload fails (screenshots, activity logs, time entries):
+  1. Save to local SQLite queue database
+  2. Every 30 seconds, check if internet is back
+  3. If connected, upload queued items oldest-first
+  4. Delete from local queue after successful upload
+Settings Sync
+
+
+On login and every 15 minutes:
+  Fetch settings table from Supabase
+  Update local configuration:
+    - screenshot interval
+    - screenshot quality  
+    - idle timeout
+    - etc.
+  This way admin can change settings from dashboard and agents pick them up
+
+Web Dashboard — Detailed Specification
+Page 1: Login (/login)
+Email input
+Password input
+"Sign In" button
+Uses Supabase Auth
+After login, redirect to Dashboard
+Only users with role='admin' can access the dashboard
+If a VA tries to log in, show error: "Dashboard access is for administrators only"
+Page 2: Dashboard (/)
+Header: Company name, admin name, logout button, navigation menu
+
+Stats Cards Row:
+
+Total Hours Today (all VAs combined)
+VAs Online Now (count, with green dot)
+Average Activity % (across all active VAs)
+Alerts (count of VAs flagged as low activity)
+VA Status Table/Cards:
+
+Column	Description
+VA Name	Full name
+Status	🟢 Online / 🔴 Offline / 🟡 Idle — with live indicator
+Current Project	Which project they're working on right now
+Hours Today	Total tracked hours today
+Activity %	Current rolling average activity
+Last Screenshot	Thumbnail, click to expand full-size
+Actions	"View Details" link
+Clicking a VA row goes to their detail page.
+
+Page 3: VA Detail View (/va/{id})
+Header: VA name, status, today's hours, activity %
+
+Tabs:
+
+Today (default)
+
+Timeline Bar — horizontal bar for the day (8am-6pm), color-coded:
+Green = active working time
+Yellow = idle time
+Gray = not tracked / break
+Blue segments show which project
+Screenshot Gallery — grid of thumbnails with timestamps, project name, activity % at capture time. Click any to view full-size in a lightbox/modal.
+Activity Chart — line chart showing keystrokes/min and clicks/min over the day
+App Usage — list or bar chart: which window titles were active and for how long. E.g.:
+"Google Chrome" — 3h 12m
+"Slack" — 1h 05m
+"VS Code" — 45m
+Time Entries — table of each start/stop session:
+Project | Start Time | End Time | Duration | Stop Reason (manual/idle/app_close)
+This Week — same data aggregated by day
+
+This Month — same data aggregated by week
+
+Custom Range — date picker to select any range
+
+Page 4: Projects (/projects)
+Create Project Button → Modal:
+
+Project Name (required)
+Description (optional)
+Color picker (for visual identification on dashboard)
+Assign VAs (multi-select checkbox list of all VAs)
+Projects Table:
+
+Column	Description
+Color dot	Visual identifier
+Project Name	Click to edit
+Description	Short text
+Assigned VAs	Avatars/names of assigned VAs
+Total Hours	All time logged to this project
+Last Activity	When was the last time entry
+Actions	Edit, Delete, View Report
+Edit Project Modal:
+
+Same as create, but pre-filled
+Can add/remove VA assignments
+Page 5: Screenshots (/screenshots)
+Filters Bar:
+VA dropdown (All / specific VA)
+Project dropdown (All / specific project)
+Date picker (single day or range)
+Time range (e.g., 9am-12pm)
+Grid View: thumbnails in a responsive grid
+Each thumbnail shows: VA name, project, time, activity %
+Click to view full-size in lightbox
+Pagination: 50 screenshots per page with Load More / page numbers
+Page 6: Reports (/reports)
+Report Types (tabs or dropdown):
+
+Time Report
+
+Table: VA Name | Mon | Tue | Wed | Thu | Fri | Sat | Sun | Total
+Filter by: date range, project, VA
+Show hours per day per VA
+Activity Report
+
+Table: VA Name | Avg Activity % | Avg Keystrokes/min | Avg Clicks/min | Hours Tracked
+Filter by: date range, project
+App Usage Report
+
+Table: VA Name | Top Apps | Time per App
+Or grouped by app: App Name | Total Hours | Which VAs Used It
+Attendance Report
+
+Calendar view or table showing:
+Which VAs worked which days
+Start time vs expected start time (late flag)
+Total hours vs expected hours
+Project Report
+
+Per project: total hours, contributing VAs, hours per VA, trend over time
+Export Button: Download any report as CSV
+
+Page 7: Team Management (/team)
+Add VA Button → Modal:
+
+Full Name
+Email
+Password (auto-generate or manual)
+Assign to Projects (multi-select)
+The system creates a Supabase auth user and a profiles record
+VA List Table:
+
+Column	Description
+Name	Full name
+Email	Login email
+Assigned Projects	List of projects
+Status	Active / Inactive
+Last Seen	Last time the desktop agent was online
+Total Hours (this week)	Quick reference
+Actions	Edit, Reset Password, Deactivate, Delete
+Page 8: Settings (/settings)
+Each setting in a clean form with labels and descriptions:
+
+Setting	Input Type	Default	Description
+Screenshot Interval	Number input (minutes)	5	How often to capture screenshots
+Screenshot Quality	Slider (1-100)	60	JPEG quality — lower = smaller files
+Idle Timeout	Number input (minutes)	5	Auto-pause after this many minutes of no activity
+Low Activity Alert Threshold	Number input (%)	30	Flag VAs below this activity %
+Data Retention	Number input (days)	90	Auto-delete screenshots older than this
+Work Start Time	Time picker	09:00	Expected start time for attendance reports
+Work End Time	Time picker	17:00	Expected end time for attendance reports
+Max Screenshots/Day	Number input	200	Safety cap per VA
+Timezone	Timezone dropdown	UTC	For all reports and timestamps
+"Save Settings" button at the bottom. Settings are saved to the settings table and desktop agents fetch them periodically.
+
+Design Requirements for Web Dashboard
+Modern, premium, dark-themed UI
+Use a clean design system (consistent colors, spacing, typography)
+Use Inter or Outfit font from Google Fonts
+Responsive — works on desktop and tablet
+Use subtle animations for loading states, transitions, hover effects
+Color scheme: dark background (#0F172A), card backgrounds (#1E293B), accent color (#3B82F6 blue), success green (#22C55E), warning yellow (#EAB308), danger red (#EF4444)
+Use charts library (Chart.js or Recharts for React) for activity graphs
+Screenshot lightbox/modal for full-size viewing
+Cloudflare R2 Setup
+Create a bucket named va-tracker-screenshots
+Generate API keys (Access Key ID + Secret Access Key)
+Use S3-compatible API from the Python agent to upload
+Use presigned URLs from the dashboard to display screenshots (so the admin can view them securely)
+File path structure: {user_id}/{YYYY-MM-DD}/{HH-MM-SS}.jpg
+Desktop Agent Distribution
+Package with PyInstaller: pyinstaller --onefile --windowed --icon=icon.ico --name=ThriveTracker agent.py
+The resulting ThriveTracker.exe is what VAs download
+No installer needed — they just run the .exe
+On first run, they enter: Server URL, email, password
+After login, the app saves config locally and auto-connects next time
+Security Considerations
+All API calls use Supabase JWT tokens (auto-handled by Supabase Auth)
+Screenshots are private in R2 — accessed only via presigned URLs
+VAs cannot see each other's data (enforced by RLS)
+Admin credentials should be strong
+Desktop agent stores credentials in a local encrypted config file (not plain text)
+Keyboard tracking counts keys only — it does NOT log which keys are pressed (privacy)
+Build Order (Phases)
+Phase 1: Supabase Setup
+Create Supabase project
+Run the SQL schema above to create all tables
+Set up RLS policies
+Create admin user via Supabase dashboard
+Test auth flow
+Phase 2: Cloudflare R2 Setup
+Create R2 bucket
+Generate API credentials
+Test upload/download with a Python script
+Phase 3: Desktop Agent
+Login window (tkinter + Supabase Auth)
+Main window with project dropdown and timer
+Screenshot capture (mss)
+Activity tracking (pynput)
+Window title tracking (pygetwindow)
+Idle detection
+Upload logic (Supabase API + R2)
+Offline queue (local SQLite)
+Settings sync
+System tray integration
+Package with PyInstaller
+Phase 4: Web Dashboard
+Setup Next.js project with Supabase client
+Login page
+Dashboard overview page
+VA detail page with screenshots, activity charts, timeline
+Projects management page
+Screenshots browser page
+Reports page with exports
+Team management page
+Settings page
+Phase 5: Testing & Polish
+Test with 2-3 VAs
+Fix bugs
+Optimize screenshot compression
+Deploy dashboard to Vercel
+Create second Supabase project for second company
+Document setup steps for admin

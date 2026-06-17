@@ -1,0 +1,352 @@
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
+from threading import RLock
+from urllib.parse import quote
+import base64
+import binascii
+import json
+import time
+import httpx
+
+from .auth_service import AuthenticatedUser, AuthError, SupabaseAuthService
+from .activity_tracker import ActivitySnapshot
+from .screenshot_service import CapturedScreenshot
+
+
+class ApiError(RuntimeError):
+    pass
+
+
+TOKEN_REFRESH_MARGIN_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class Project:
+    id: str
+    name: str
+    color: str
+
+
+@dataclass(frozen=True)
+class TimeEntry:
+    id: str
+    project_id: str
+    started_at: datetime
+
+
+class SupabaseApiService:
+    def __init__(
+        self,
+        supabase_url: str,
+        anon_key: str,
+        user: AuthenticatedUser,
+        on_session_refresh: Callable[[AuthenticatedUser], None] | None = None,
+    ) -> None:
+        self.base_url = supabase_url.rstrip("/")
+        self.anon_key = anon_key
+        self.user = user
+        self.on_session_refresh = on_session_refresh
+        self.auth_service = SupabaseAuthService()
+        self._refresh_lock = RLock()
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {
+            "apikey": self.anon_key,
+            "authorization": f"Bearer {self.user.access_token}",
+            "content-type": "application/json",
+        }
+
+    def get_assigned_projects(self) -> list[Project]:
+        data = self._request(
+            "GET",
+            f"/rest/v1/project_assignments?select=projects(id,name,color,is_active)&user_id=eq.{quote(self.user.user_id)}&order=assigned_at.asc",
+        )
+        projects: list[Project] = []
+        seen_project_ids: set[str] = set()
+
+        for item in data:
+            project = item.get("projects")
+            if not project or not project.get("is_active") or project["id"] in seen_project_ids:
+                continue
+
+            seen_project_ids.add(project["id"])
+            projects.append(
+                Project(
+                    id=project["id"],
+                    name=project["name"],
+                    color=project.get("color") or "#2563EB",
+                )
+            )
+
+        return sorted(projects, key=lambda project: project.name.lower())
+
+    def start_time_entry(self, project_id: str) -> TimeEntry:
+        started_at = datetime.now(timezone.utc)
+        data = self._request(
+            "POST",
+            "/rest/v1/time_entries",
+            json={
+                "user_id": self.user.user_id,
+                "project_id": project_id,
+                "started_at": started_at.isoformat(),
+                "is_manual": False,
+            },
+            prefer="return=representation",
+        )
+        if not data:
+            raise ApiError("Supabase did not return the new time entry.")
+
+        return TimeEntry(
+            id=data[0]["id"],
+            project_id=project_id,
+            started_at=started_at,
+        )
+
+    def stop_time_entry(self, entry: TimeEntry, reason: str = "manual") -> int:
+        stopped_at = datetime.now(timezone.utc)
+        duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
+        self.update_time_entry_stop(
+            entry_id=entry.id,
+            stopped_at=stopped_at.isoformat(),
+            duration_seconds=duration_seconds,
+            reason=reason,
+        )
+        return duration_seconds
+
+    def update_time_entry_stop(
+        self,
+        entry_id: str,
+        stopped_at: str,
+        duration_seconds: int,
+        reason: str,
+    ) -> None:
+        self._request(
+            "PATCH",
+            f"/rest/v1/time_entries?id=eq.{quote(entry_id)}",
+            json={
+                "stopped_at": stopped_at,
+                "duration_seconds": duration_seconds,
+                "stop_reason": reason,
+            },
+            prefer="return=minimal",
+        )
+
+    def upload_screenshot(
+        self,
+        bucket_name: str,
+        screenshot: CapturedScreenshot,
+        time_entry_id: str,
+        project_id: str,
+        activity_percent: float | None = None,
+    ) -> None:
+        self.upload_screenshot_file(
+            bucket_name=bucket_name,
+            file_path=screenshot.file_path,
+            storage_key=screenshot.storage_key,
+            captured_at=screenshot.captured_at.isoformat(),
+            file_size_bytes=screenshot.file_size_bytes,
+            time_entry_id=time_entry_id,
+            project_id=project_id,
+            activity_percent=activity_percent,
+        )
+
+    def upload_screenshot_file(
+        self,
+        bucket_name: str,
+        file_path: Path,
+        storage_key: str,
+        captured_at: str,
+        file_size_bytes: int,
+        time_entry_id: str,
+        project_id: str,
+        activity_percent: float | None = None,
+    ) -> None:
+        self._upload_storage_object(bucket_name, file_path, storage_key)
+        self._request(
+            "POST",
+            "/rest/v1/screenshots",
+            json={
+                "user_id": self.user.user_id,
+                "time_entry_id": time_entry_id,
+                "project_id": project_id,
+                "captured_at": captured_at,
+                "storage_url": storage_key,
+                "storage_key": storage_key,
+                "file_size_bytes": file_size_bytes,
+                "activity_percent_at_capture": activity_percent,
+            },
+            prefer="return=minimal",
+        )
+
+    def insert_activity_log(
+        self,
+        time_entry_id: str,
+        snapshot: ActivitySnapshot,
+        active_window_title: str | None = None,
+        active_app_name: str | None = None,
+    ) -> None:
+        self.insert_activity_log_payload(
+            {
+                "user_id": self.user.user_id,
+                "time_entry_id": time_entry_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "keystrokes_count": snapshot.keystrokes_count,
+                "mouse_clicks_count": snapshot.mouse_clicks_count,
+                "mouse_moved": snapshot.mouse_moved,
+                "activity_percent": snapshot.activity_percent,
+                "active_window_title": active_window_title,
+                "active_app_name": active_app_name,
+            }
+        )
+
+    def insert_activity_log_payload(self, payload: dict) -> None:
+        self._request(
+            "POST",
+            "/rest/v1/activity_logs",
+            json=payload,
+            prefer="return=minimal",
+        )
+
+    def get_today_total_seconds(self) -> int:
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        query = (
+            "/rest/v1/time_entries"
+            "?select=duration_seconds,started_at"
+            f"&user_id=eq.{quote(self.user.user_id)}"
+            f"&started_at=gte.{quote(today_start.isoformat())}"
+        )
+        data = self._request("GET", query)
+        return sum(int(item.get("duration_seconds") or 0) for item in data)
+
+    def get_settings(self) -> dict[str, str]:
+        data = self._request("GET", "/rest/v1/settings?select=key,value")
+        return {item["key"]: item["value"] for item in data}
+
+    def record_heartbeat(self) -> None:
+        self._request(
+            "POST",
+            "/rest/v1/rpc/record_heartbeat",
+            json={},
+            prefer="return=minimal",
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        json: dict | None = None,
+        prefer: str | None = None,
+        retry_on_unauthorized: bool = True,
+    ):
+        self._ensure_fresh_token()
+        headers = self.headers
+        if prefer:
+            headers["prefer"] = prefer
+
+        try:
+            with httpx.Client(timeout=20) as client:
+                response = client.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    headers=headers,
+                    json=json,
+                )
+        except httpx.HTTPError as error:
+            raise ApiError("Could not reach Supabase. Check your internet connection.") from error
+
+        if response.status_code == 401 and retry_on_unauthorized:
+            self._refresh_session(force=True)
+            return self._request(
+                method,
+                path,
+                json=json,
+                prefer=prefer,
+                retry_on_unauthorized=False,
+            )
+
+        if response.status_code >= 400:
+            raise ApiError(f"Supabase request failed: {response.status_code} {response.text}")
+
+        if not response.content:
+            return None
+
+        return response.json()
+
+    def _upload_storage_object(self, bucket_name: str, file_path: Path, storage_key: str) -> None:
+        self._ensure_fresh_token()
+        object_path = "/".join(quote(part) for part in PurePosixPath(storage_key).parts)
+        upload_url = f"{self.base_url}/storage/v1/object/{quote(bucket_name)}/{object_path}"
+
+        headers = {
+            "apikey": self.anon_key,
+            "authorization": f"Bearer {self.user.access_token}",
+            "content-type": "image/jpeg",
+            "x-upsert": "true",
+        }
+
+        try:
+            with httpx.Client(timeout=60) as client:
+                response = client.post(
+                    upload_url,
+                    headers=headers,
+                    content=file_path.read_bytes(),
+                )
+        except httpx.HTTPError as error:
+            raise ApiError("Could not upload screenshot to Supabase Storage.") from error
+
+        if response.status_code == 401:
+            self._refresh_session(force=True)
+            headers["authorization"] = f"Bearer {self.user.access_token}"
+            try:
+                with httpx.Client(timeout=60) as client:
+                    response = client.post(
+                        upload_url,
+                        headers=headers,
+                        content=file_path.read_bytes(),
+                    )
+            except httpx.HTTPError as error:
+                raise ApiError("Could not upload screenshot to Supabase Storage.") from error
+
+        if response.status_code >= 400:
+            raise ApiError(f"Screenshot upload failed: {response.status_code} {response.text}")
+
+    def _ensure_fresh_token(self) -> None:
+        expires_at = self._access_token_expires_at()
+        if expires_at is None:
+            return
+
+        refresh_at = expires_at - TOKEN_REFRESH_MARGIN_SECONDS
+        if time.time() >= refresh_at:
+            self._refresh_session()
+
+    def _refresh_session(self, force: bool = False) -> None:
+        with self._refresh_lock:
+            if not force:
+                expires_at = self._access_token_expires_at()
+                if expires_at and time.time() < expires_at - TOKEN_REFRESH_MARGIN_SECONDS:
+                    return
+
+            try:
+                self.auth_service.refresh_session(self.base_url, self.anon_key, self.user)
+                if self.on_session_refresh:
+                    self.on_session_refresh(self.user)
+            except AuthError as error:
+                raise ApiError(str(error)) from error
+
+    def _access_token_expires_at(self) -> int | None:
+        try:
+            parts = self.user.access_token.split(".")
+            if len(parts) < 2:
+                return None
+
+            payload = parts[1]
+            padded_payload = payload + "=" * (-len(payload) % 4)
+            decoded_payload = base64.urlsafe_b64decode(padded_payload.encode("utf-8"))
+            claims = json.loads(decoded_payload)
+            expires_at = claims.get("exp")
+            return int(expires_at) if expires_at else None
+        except (binascii.Error, ValueError, json.JSONDecodeError, TypeError):
+            return None
