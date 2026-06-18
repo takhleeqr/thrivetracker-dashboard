@@ -125,6 +125,7 @@ export async function loadReportOptions(supabase: SupabaseClient): Promise<{
 
 export async function loadReports(supabase: SupabaseClient, filter: ReportFilter): Promise<ReportsData> {
   const { start, end } = buildReportRange(filter);
+  const selectedRange = { start, end };
 
   const [profilesResult, projectsResult, entriesResult, activityResult] = await Promise.all([
     supabase.from("profiles").select("id,full_name,hourly_rate").eq("role", "va"),
@@ -132,8 +133,8 @@ export async function loadReports(supabase: SupabaseClient, filter: ReportFilter
     supabase
       .from("time_entries")
       .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual")
-      .gte("started_at", start)
       .lte("started_at", end)
+      .or(`stopped_at.is.null,stopped_at.gte.${start}`)
       .order("started_at", { ascending: true })
       .limit(10000),
     supabase
@@ -169,12 +170,12 @@ export async function loadReports(supabase: SupabaseClient, filter: ReportFilter
   });
 
   return {
-    timeRows: buildTimeRows(entries, profileNames, hourlyRates),
+    timeRows: buildTimeRows(entries, profileNames, hourlyRates, selectedRange),
     activityRows: buildActivityRows(activityLogs, profileNames),
     appRows: buildAppRows(activityLogs),
-    attendanceRows: buildAttendanceRows(entries, profileNames),
-    payrollRows: buildPayrollRows(entries, profileNames, hourlyRates, filter.timezone ?? "Asia/Karachi"),
-    projectRows: buildProjectRows(entries, projectNames),
+    attendanceRows: buildAttendanceRows(entries, profileNames, selectedRange),
+    payrollRows: buildPayrollRows(entries, profileNames, hourlyRates, filter.timezone ?? "Asia/Karachi", selectedRange),
+    projectRows: buildProjectRows(entries, projectNames, selectedRange),
   };
 }
 
@@ -187,10 +188,17 @@ export function buildReportRange(filter: ReportFilter) {
   };
 }
 
-function buildTimeRows(entries: TimeEntryRow[], profileNames: Map<string, string>, hourlyRates: Map<string, number>): TimeReportRow[] {
+function buildTimeRows(
+  entries: TimeEntryRow[],
+  profileNames: Map<string, string>,
+  hourlyRates: Map<string, number>,
+  range: { start: string; end: string },
+): TimeReportRow[] {
   const rows = new Map<string, TimeReportRow>();
 
   for (const entry of entries) {
+    const seconds = entrySecondsInRange(entry, range);
+    if (!seconds) continue;
     const row = rows.get(entry.user_id) ?? {
       userId: entry.user_id,
       vaName: profileNames.get(entry.user_id) ?? "Unknown VA",
@@ -199,7 +207,7 @@ function buildTimeRows(entries: TimeEntryRow[], profileNames: Map<string, string
       entryCount: 0,
       manualEntries: 0,
     };
-    row.totalSeconds += entry.duration_seconds ?? 0;
+    row.totalSeconds += seconds;
     row.earnings = earningsForSeconds(row.totalSeconds, hourlyRates.get(entry.user_id) ?? 0);
     row.entryCount += 1;
     row.manualEntries += entry.is_manual ? 1 : 0;
@@ -214,24 +222,26 @@ function buildPayrollRows(
   profileNames: Map<string, string>,
   hourlyRates: Map<string, number>,
   timezone: string,
+  range: { start: string; end: string },
 ): PayrollReportRow[] {
   const rows = new Map<string, PayrollReportRow>();
 
   for (const entry of entries) {
-    const date = dateInputValue(entry.started_at, timezone);
-    const hourlyRate = hourlyRates.get(entry.user_id) ?? 0;
-    const key = `${entry.user_id}-${date}`;
-    const row = rows.get(key) ?? {
-      date,
-      earnings: 0,
-      hourlyRate,
-      totalSeconds: 0,
-      userId: entry.user_id,
-      vaName: profileNames.get(entry.user_id) ?? "Unknown VA",
-    };
-    row.totalSeconds += entry.duration_seconds ?? 0;
-    row.earnings = earningsForSeconds(row.totalSeconds, hourlyRate);
-    rows.set(key, row);
+    for (const segment of splitEntryByDate(entry, timezone, range)) {
+      const hourlyRate = hourlyRates.get(entry.user_id) ?? 0;
+      const key = `${entry.user_id}-${segment.date}`;
+      const row = rows.get(key) ?? {
+        date: segment.date,
+        earnings: 0,
+        hourlyRate,
+        totalSeconds: 0,
+        userId: entry.user_id,
+        vaName: profileNames.get(entry.user_id) ?? "Unknown VA",
+      };
+      row.totalSeconds += segment.seconds;
+      row.earnings = earningsForSeconds(row.totalSeconds, hourlyRate);
+      rows.set(key, row);
+    }
   }
 
   return [...rows.values()].sort((first, second) => first.date.localeCompare(second.date) || first.vaName.localeCompare(second.vaName));
@@ -281,10 +291,12 @@ function buildAppRows(logs: ActivityLogRow[]): AppUsageReportRow[] {
     .sort((first, second) => second.minutes - first.minutes);
 }
 
-function buildAttendanceRows(entries: TimeEntryRow[], profileNames: Map<string, string>): AttendanceReportRow[] {
+function buildAttendanceRows(entries: TimeEntryRow[], profileNames: Map<string, string>, range: { start: string; end: string }): AttendanceReportRow[] {
   const rows = new Map<string, AttendanceReportRow & { daySet: Set<string> }>();
 
   for (const entry of entries) {
+    const seconds = entrySecondsInRange(entry, range);
+    if (!seconds) continue;
     const row = rows.get(entry.user_id) ?? {
       userId: entry.user_id,
       vaName: profileNames.get(entry.user_id) ?? "Unknown VA",
@@ -298,7 +310,7 @@ function buildAttendanceRows(entries: TimeEntryRow[], profileNames: Map<string, 
     row.daySet.add(dayKey);
     row.firstStart = earliest(row.firstStart, entry.started_at);
     row.lastStop = latest(row.lastStop, entry.stopped_at ?? entry.started_at);
-    row.totalSeconds += entry.duration_seconds ?? 0;
+    row.totalSeconds += seconds;
     rows.set(entry.user_id, row);
   }
 
@@ -310,10 +322,12 @@ function buildAttendanceRows(entries: TimeEntryRow[], profileNames: Map<string, 
     .sort((first, second) => second.totalSeconds - first.totalSeconds);
 }
 
-function buildProjectRows(entries: TimeEntryRow[], projectNames: Map<string, string>): ProjectReportRow[] {
+function buildProjectRows(entries: TimeEntryRow[], projectNames: Map<string, string>, range: { start: string; end: string }): ProjectReportRow[] {
   const rows = new Map<string, ProjectReportRow & { vaIds: Set<string> }>();
 
   for (const entry of entries) {
+    const seconds = entrySecondsInRange(entry, range);
+    if (!seconds) continue;
     const projectId = entry.project_id ?? "unassigned";
     const row = rows.get(projectId) ?? {
       projectId,
@@ -323,7 +337,7 @@ function buildProjectRows(entries: TimeEntryRow[], projectNames: Map<string, str
       vaCount: 0,
       vaIds: new Set<string>(),
     };
-    row.totalSeconds += entry.duration_seconds ?? 0;
+    row.totalSeconds += seconds;
     row.entryCount += 1;
     row.vaIds.add(entry.user_id);
     rows.set(projectId, row);
@@ -335,6 +349,44 @@ function buildProjectRows(entries: TimeEntryRow[], projectNames: Map<string, str
       vaCount: vaIds.size,
     }))
     .sort((first, second) => second.totalSeconds - first.totalSeconds);
+}
+
+function entrySecondsInRange(entry: TimeEntryRow, range: { start: string; end: string }) {
+  const rangeStart = new Date(range.start).getTime();
+  const rangeEnd = new Date(range.end).getTime();
+  const entryStart = new Date(entry.started_at).getTime();
+  const entryEnd = entryEndMs(entry);
+  const clampedStart = Math.max(entryStart, rangeStart);
+  const clampedEnd = Math.min(entryEnd, rangeEnd);
+  return Math.max(0, Math.floor((clampedEnd - clampedStart) / 1000));
+}
+
+function splitEntryByDate(entry: TimeEntryRow, timezone: string, range: { start: string; end: string }) {
+  const rangeStart = new Date(range.start).getTime();
+  const rangeEnd = new Date(range.end).getTime();
+  const entryStart = Math.max(new Date(entry.started_at).getTime(), rangeStart);
+  const entryEnd = Math.min(entryEndMs(entry), rangeEnd);
+  const segments: Array<{ date: string; seconds: number }> = [];
+  let cursor = entryStart;
+
+  while (cursor < entryEnd) {
+    const date = dateInputValue(new Date(cursor), timezone);
+    const dayEnd = new Date(endOfDayIso(date, timezone)).getTime();
+    const segmentEnd = Math.min(entryEnd, dayEnd + 1);
+    const seconds = Math.max(0, Math.floor((segmentEnd - cursor) / 1000));
+    if (seconds) {
+      segments.push({ date, seconds });
+    }
+    cursor = segmentEnd > cursor ? segmentEnd : cursor + 60_000;
+  }
+
+  return segments;
+}
+
+function entryEndMs(entry: TimeEntryRow) {
+  if (entry.stopped_at) return new Date(entry.stopped_at).getTime();
+  if (entry.duration_seconds) return new Date(entry.started_at).getTime() + entry.duration_seconds * 1000;
+  return new Date(entry.started_at).getTime();
 }
 
 function cleanName(value: string): string {

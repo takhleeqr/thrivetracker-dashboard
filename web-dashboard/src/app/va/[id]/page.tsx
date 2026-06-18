@@ -12,6 +12,7 @@ import { loadSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
 import {
   endOfDayIso,
+  dateInputValue,
   formatDate,
   formatDateTimeFull,
   formatDateTime as formatInTimezone,
@@ -154,7 +155,7 @@ export default function VaDetailPage() {
     await refreshData();
   }
 
-  const breaks = useMemo(() => buildBreaks(detail?.timeline ?? []), [detail?.timeline]);
+  const breaks = useMemo(() => buildBreaks(detail?.timeline ?? [], timezone), [detail?.timeline, timezone]);
   const totalBreakSeconds = breaks.reduce((sum, item) => sum + item.durationSeconds, 0);
 
   if (isLoading && !detail) {
@@ -673,13 +674,16 @@ function sampleLogs(logs: ActivityLog[], maxBars: number) {
   return sampled;
 }
 
-function buildBreaks(segments: TimelineSegment[]) {
+function buildBreaks(segments: TimelineSegment[], timezone: string) {
   const sortedSegments = [...segments].sort((first, second) => new Date(first.displayStartedAt).getTime() - new Date(second.displayStartedAt).getTime());
   const breaks: Array<{ durationSeconds: number; end: string; start: string }> = [];
 
   for (let index = 1; index < sortedSegments.length; index += 1) {
     const previous = sortedSegments[index - 1];
     const current = sortedSegments[index];
+    if (dateInputValue(previous.displayStoppedAt, timezone) !== dateInputValue(current.displayStartedAt, timezone)) {
+      continue;
+    }
     const startMs = new Date(previous.displayStoppedAt).getTime();
     const endMs = new Date(current.displayStartedAt).getTime();
     const durationSeconds = Math.max(0, Math.floor((endMs - startMs) / 1000));

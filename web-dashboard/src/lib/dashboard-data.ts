@@ -190,7 +190,9 @@ export async function loadDashboardSummary(
   supabase: SupabaseClient,
   timezone = "Asia/Karachi",
   settings?: Partial<Pick<AppSettings, "late_start_time" | "work_end_time" | "low_activity_threshold" | "low_activity_minimum_minutes">>,
+  options: { includePersistedAlerts?: boolean } = {},
 ): Promise<DashboardSummary> {
+  const includePersistedAlerts = options.includePersistedAlerts ?? true;
   const todayStart = startOfTodayIso(timezone);
   const todayEnd = new Date().toISOString();
   const weekStart = currentWeekRange(timezone).start;
@@ -238,7 +240,7 @@ export async function loadDashboardSummary(
   const entries = (entriesResult.data ?? []) as TimeEntry[];
   const activityLogs = (activityResult.data ?? []) as ActivityLog[];
   const screenshots = await addSignedScreenshotUrls(supabase, latestScreenshotPerUser((screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[]));
-  const persistedAlerts = ((persistedAlertsResult.data ?? []) as PersistedDashboardAlert[]).map((alert) => ({
+  const persistedAlerts = (includePersistedAlerts ? ((persistedAlertsResult.data ?? []) as PersistedDashboardAlert[]) : []).map((alert) => ({
     id: alert.alert_key,
     message: alert.message,
     severity: alert.severity,
@@ -354,7 +356,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
     supabase.from("project_assignments").select("project_id").eq("user_id", userId),
     supabase
       .from("time_entries")
-      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,stop_reason")
+      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason")
       .eq("user_id", userId)
       .lte("started_at", selectedRange.end)
       .or(`stopped_at.is.null,stopped_at.gte.${selectedRange.start}`)
@@ -418,7 +420,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
     screenshots,
     activityLogs,
     appUsage: buildAppUsage(activityLogs),
-    dailyPay: buildDailyPay(entries, selectedRange, timezone, hourlyRate),
+    dailyPay: buildDailyPay(entries, selectedRange, timezone, hourlyRate, Date.now(), profile.last_seen_at, status),
     projectOptions: projects
       .filter((project) => project.is_active !== false && assignedProjectIds.has(project.id))
       .sort((first, second) => first.name.localeCompare(second.name)),
@@ -560,14 +562,28 @@ function totalSecondsInRange(
   }, 0);
 }
 
-function buildDailyPay(entries: TimeEntry[], range: DetailDateRange, timezone: string, hourlyRate: number) {
+function buildDailyPay(
+  entries: TimeEntry[],
+  range: DetailDateRange,
+  timezone: string,
+  hourlyRate: number,
+  now: number,
+  lastSeenAt: string | null,
+  status: DashboardRow["status"],
+) {
   const rows = new Map<string, number>();
   const rangeStart = new Date(range.start).getTime();
   const rangeEnd = new Date(range.end).getTime();
 
   for (const entry of entries) {
     const entryStart = new Date(entry.started_at).getTime();
-    const entryEnd = new Date(entry.stopped_at ?? entry.started_at).getTime();
+    const entryEnd = entry.stopped_at
+      ? new Date(entry.stopped_at).getTime()
+      : status === "online"
+        ? Math.min(now, rangeEnd)
+        : lastSeenAt
+          ? Math.min(new Date(lastSeenAt).getTime(), rangeEnd)
+          : entryStart;
     const clampedStart = Math.max(entryStart, rangeStart);
     const clampedEnd = Math.min(entryEnd, rangeEnd);
     const seconds = Math.max(0, Math.floor((clampedEnd - clampedStart) / 1000));

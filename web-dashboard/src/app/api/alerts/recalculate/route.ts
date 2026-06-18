@@ -23,7 +23,9 @@ async function recalculateAlerts(request: NextRequest) {
       auth: { autoRefreshToken: false, persistSession: false },
     });
     const settings = await loadSettings(supabase);
-    const summary = await loadDashboardSummary(supabase, settings.timezone || defaultSettings.timezone, settings);
+    const summary = await loadDashboardSummary(supabase, settings.timezone || defaultSettings.timezone, settings, {
+      includePersistedAlerts: false,
+    });
     const activeAlerts = summary.alerts;
     const activeKeys = activeAlerts.map((alert) => alert.id);
 
@@ -84,10 +86,6 @@ function requireCronSecret(request: NextRequest): NextResponse | null {
     return null;
   }
 
-  if (isVercelCronRequest(request)) {
-    return null;
-  }
-
   if (!configuredSecret) return new NextResponse("Missing CRON_SECRET.", { status: 500 });
 
   if (providedSecret !== configuredSecret) {
@@ -95,11 +93,6 @@ function requireCronSecret(request: NextRequest): NextResponse | null {
   }
 
   return null;
-}
-
-function isVercelCronRequest(request: NextRequest) {
-  const userAgent = request.headers.get("user-agent") ?? "";
-  return process.env.VERCEL_ENV === "production" && userAgent.includes("vercel-cron");
 }
 
 function quotePostgrestValue(value: string) {
