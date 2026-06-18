@@ -1,16 +1,16 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { useRouter } from "next/navigation";
-import { Activity, AlertTriangle, CalendarDays, Clock3, DollarSign, Download, MonitorCheck, RefreshCw, UsersRound } from "lucide-react";
-import { Button, Card, Input, Select, Table, Tabs } from "@/components/ui";
+import { Activity, AlertTriangle, CalendarDays, Clock3, DollarSign, Download, MonitorCheck, RefreshCw, UsersRound, X } from "lucide-react";
+import { Button, Card, Input, ModalFrame, Select, Table, Tabs } from "@/components/ui";
 import type { DashboardAlert, DashboardRow, DashboardSummary, Profile } from "@/lib/dashboard-data";
 import { closeStaleTimeEntries, loadAdminProfile, loadDashboardSummary } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
 import { defaultSettings, loadSettings, type AppSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
-import { formatTime } from "@/lib/timezone";
+import { endOfDayIso, formatTime, startOfDayIso, todayDateInputValue } from "@/lib/timezone";
 import { downloadXlsx } from "@/lib/xlsx-export";
 
 const navItems = [
@@ -33,6 +33,13 @@ const emptySummary: DashboardSummary = {
   rows: [],
 };
 
+type OverviewRangeMode = "today" | "yesterday" | "week" | "month" | "custom";
+type OverviewScreenshot = {
+  capturedAt: string;
+  signedUrl: string;
+  vaName: string;
+};
+
 export default function DashboardHome() {
   const router = useRouter();
   const [admin, setAdmin] = useState<Profile | null>(null);
@@ -45,6 +52,10 @@ export default function DashboardHome() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [timezone, setTimezone] = useState("Asia/Karachi");
   const [dashboardSettings, setDashboardSettings] = useState<AppSettings>(defaultSettings);
+  const [rangeMode, setRangeMode] = useState<OverviewRangeMode>("today");
+  const [customDate, setCustomDate] = useState(todayDateInputValue("Asia/Karachi"));
+  const [selectedScreenshot, setSelectedScreenshot] = useState<OverviewScreenshot | null>(null);
+  const selectedRange = useMemo(() => buildOverviewRange(rangeMode, customDate, timezone), [customDate, rangeMode, timezone]);
 
   useEffect(() => {
     let isMounted = true;
@@ -67,8 +78,9 @@ export default function DashboardHome() {
       setAdmin(profile);
       const settings = await loadSettings(supabase);
       setTimezone(settings.timezone);
+      setCustomDate(todayDateInputValue(settings.timezone));
       setDashboardSettings(settings);
-      await refreshData(settings.timezone, settings);
+      await refreshData(settings.timezone, settings, buildOverviewRange(rangeMode, todayDateInputValue(settings.timezone), settings.timezone));
     }
 
     boot();
@@ -79,15 +91,15 @@ export default function DashboardHome() {
 
   useEffect(() => {
     if (!admin) return;
-    const intervalId = window.setInterval(() => refreshData(timezone, dashboardSettings), 15_000);
+    const intervalId = window.setInterval(() => refreshData(timezone, dashboardSettings, selectedRange), 60_000);
     return () => window.clearInterval(intervalId);
-  }, [admin, dashboardSettings, timezone]);
+  }, [admin, dashboardSettings, selectedRange, timezone]);
 
-  async function refreshData(selectedTimezone = timezone, selectedSettings = dashboardSettings) {
+  async function refreshData(selectedTimezone = timezone, selectedSettings = dashboardSettings, range = selectedRange) {
     try {
       setError("");
       await closeStaleTimeEntries(supabase);
-      const nextSummary = await loadDashboardSummary(supabase, selectedTimezone, selectedSettings);
+      const nextSummary = await loadDashboardSummary(supabase, selectedTimezone, selectedSettings, { range });
       setSummary(nextSummary);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
@@ -126,8 +138,8 @@ export default function DashboardHome() {
   );
 
   const stats = [
-    { label: "Total Hours Today", value: formatHours(summary.totalHoursTodaySeconds), icon: Clock3, tone: "hours" },
-    { label: "Total Earnings Today", value: formatMoney(summary.totalEarningsToday), icon: DollarSign, tone: "earnings" },
+    { label: rangeMode === "today" ? "Total Hours Today" : "Tracked Hours", value: formatHours(summary.totalHoursTodaySeconds), icon: Clock3, tone: "hours" },
+    { label: rangeMode === "today" ? "Total Earnings Today" : "Payable Earnings", value: formatMoney(summary.totalEarningsToday), icon: DollarSign, tone: "earnings" },
     { label: "Total Hours This Week", value: formatHours(summary.totalHoursWeekSeconds), icon: CalendarDays, tone: "hours" },
     { label: "VAs Online", value: String(summary.onlineCount), icon: UsersRound, tone: "online" },
     { label: "Average Activity", value: formatPercent(summary.averageActivityPercent), icon: Activity, tone: "activity" },
@@ -162,10 +174,17 @@ export default function DashboardHome() {
             </p>
           </div>
           <div className="topbar-actions">
-            <Select aria-label="Date range" defaultValue="today">
+            <Select aria-label="Date range" onChange={(event) => setRangeMode(event.target.value as OverviewRangeMode)} value={rangeMode}>
               <option value="today">Today</option>
+              <option value="yesterday">Yesterday</option>
+              <option value="week">This Week</option>
+              <option value="month">This Month</option>
+              <option value="custom">Custom</option>
             </Select>
-            <Button onClick={() => refreshData()} type="button" variant="secondary">
+            {rangeMode === "custom" ? (
+              <Input aria-label="Custom overview date" onChange={(event) => setCustomDate(event.target.value)} type="date" value={customDate} />
+            ) : null}
+            <Button onClick={() => refreshData(timezone, dashboardSettings, selectedRange)} type="button" variant="secondary">
               <RefreshCw size={16} />
               Refresh
             </Button>
@@ -253,7 +272,7 @@ export default function DashboardHome() {
                 <span>Last Screenshot</span>
               </div>
               {visibleRows.length ? (
-                visibleRows.map((row) => <VaRow key={row.userId} row={row} />)
+                visibleRows.map((row) => <VaRow key={row.userId} onScreenshotClick={setSelectedScreenshot} row={row} />)
               ) : (
                 <div className="empty-state">
                   <MonitorCheck size={28} />
@@ -265,11 +284,12 @@ export default function DashboardHome() {
           </Card>
         </section>
       </section>
+      {selectedScreenshot ? <OverviewScreenshotLightbox item={selectedScreenshot} onClose={() => setSelectedScreenshot(null)} timezone={timezone} /> : null}
     </main>
   );
 }
 
-function VaRow({ row }: { row: DashboardRow }) {
+function VaRow({ onScreenshotClick, row }: { onScreenshotClick: (item: OverviewScreenshot) => void; row: DashboardRow }) {
   return (
     <Link className="table-row data-row data-row-link overview-table-row" href={`/va/${row.userId}`}>
       <span>
@@ -293,13 +313,54 @@ function VaRow({ row }: { row: DashboardRow }) {
       <span>{row.alerts.length ? <span className="alert-badge">{row.alerts.length}</span> : "-"}</span>
       <span>
         {row.lastScreenshot?.signedUrl ? (
-          <img className="overview-shot-thumb" alt={`Latest screenshot for ${row.name}`} src={row.lastScreenshot.signedUrl} />
+          <button
+            className="overview-shot-button"
+            onClick={(event) => openOverviewScreenshot(event, row, onScreenshotClick)}
+            type="button"
+          >
+            <img className="overview-shot-thumb" alt={`Latest screenshot for ${row.name}`} src={row.lastScreenshot.signedUrl} />
+          </button>
         ) : (
           "-"
         )}
       </span>
     </Link>
   );
+}
+
+function OverviewScreenshotLightbox({ item, onClose, timezone }: { item: OverviewScreenshot; onClose: () => void; timezone: string }) {
+  return (
+    <div className="modal-backdrop screenshot-lightbox-backdrop">
+      <ModalFrame className="screenshot-lightbox">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Last Screenshot</p>
+            <h3>{item.vaName}</h3>
+            <p className="subtle-line">{formatTime(item.capturedAt, timezone)}</p>
+          </div>
+          <button className="modal-close" onClick={onClose} type="button">
+            <X size={18} />
+          </button>
+        </div>
+        <img alt={`Latest screenshot for ${item.vaName}`} className="lightbox-image" src={item.signedUrl} />
+      </ModalFrame>
+    </div>
+  );
+}
+
+function openOverviewScreenshot(
+  event: MouseEvent<HTMLButtonElement>,
+  row: DashboardRow,
+  onScreenshotClick: (item: OverviewScreenshot) => void,
+) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!row.lastScreenshot?.signedUrl) return;
+  onScreenshotClick({
+    capturedAt: row.lastScreenshot.capturedAt,
+    signedUrl: row.lastScreenshot.signedUrl,
+    vaName: row.name,
+  });
 }
 
 function AlertPanel({ alerts }: { alerts: DashboardAlert[] }) {
@@ -364,4 +425,55 @@ function statusLabel(status: DashboardRow["status"]) {
 
 function formatMoney(value: number) {
   return `$${value.toFixed(2)}`;
+}
+
+function buildOverviewRange(mode: OverviewRangeMode, customDate: string, timezone: string) {
+  const todayInput = todayDateInputValue(timezone);
+  let startInput = todayInput;
+  let endInput = todayInput;
+
+  if (mode === "yesterday") {
+    const date = dateFromInput(todayInput);
+    date.setDate(date.getDate() - 1);
+    startInput = inputFromDate(date);
+    endInput = startInput;
+  }
+
+  if (mode === "week") {
+    const date = dateFromInput(todayInput);
+    const daysSinceMonday = (date.getDay() + 6) % 7;
+    date.setDate(date.getDate() - daysSinceMonday);
+    startInput = inputFromDate(date);
+  }
+
+  if (mode === "month") {
+    const date = dateFromInput(todayInput);
+    date.setDate(1);
+    startInput = inputFromDate(date);
+  }
+
+  if (mode === "custom") {
+    startInput = customDate || todayInput;
+    endInput = startInput;
+  }
+
+  return {
+    start: startOfDayIso(startInput, timezone),
+    end: mode === "today" || mode === "week" || mode === "month" ? new Date().toISOString() : endOfDayIso(endInput, timezone),
+  };
+}
+
+function dateFromInput(value: string): Date {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date();
+  date.setFullYear(year, month - 1, day);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
+function inputFromDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }

@@ -84,14 +84,12 @@ class SupabaseApiService:
         return sorted(projects, key=lambda project: project.name.lower())
 
     def start_time_entry(self, project_id: str) -> TimeEntry:
-        started_at = datetime.now(timezone.utc)
         data = self._request(
             "POST",
             "/rest/v1/time_entries",
             json={
                 "user_id": self.user.user_id,
                 "project_id": project_id,
-                "started_at": started_at.isoformat(),
                 "is_manual": False,
             },
             prefer="return=representation",
@@ -102,7 +100,7 @@ class SupabaseApiService:
         return TimeEntry(
             id=data[0]["id"],
             project_id=project_id,
-            started_at=started_at,
+            started_at=_parse_supabase_datetime(data[0]["started_at"]),
         )
 
     def stop_time_entry(self, entry: TimeEntry, reason: str = "manual") -> int:
@@ -350,3 +348,11 @@ class SupabaseApiService:
             return int(expires_at) if expires_at else None
         except (binascii.Error, ValueError, json.JSONDecodeError, TypeError):
             return None
+
+
+def _parse_supabase_datetime(value: str) -> datetime:
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

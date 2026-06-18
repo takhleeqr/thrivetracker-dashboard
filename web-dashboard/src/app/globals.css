@@ -396,6 +396,13 @@ select {
   background: var(--surface-soft);
 }
 
+.overview-shot-button {
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+  padding: 0;
+}
+
 .table-head {
   background: var(--surface-soft);
   color: var(--muted);
@@ -663,8 +670,12 @@ select {
   font-weight: 800;
 }
 
-.timeline-axis span:not(:first-child) {
+.timeline-axis span:not(:first-child):not(:last-child) {
   text-align: center;
+}
+
+.timeline-axis span:last-child {
+  text-align: right;
 }
 
 .timeline-track {
@@ -739,6 +750,23 @@ select {
   border-radius: 999px 999px 0 0;
   background: var(--blue);
   opacity: 0.82;
+}
+
+.activity-axis {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.activity-axis span:not(:first-child):not(:last-child) {
+  text-align: center;
+}
+
+.activity-axis span:last-child {
+  text-align: right;
 }
 
 .break-list {
@@ -1062,7 +1090,7 @@ select {
 
 .screenshot-filters {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) 160px 130px 130px auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) 160px 130px 130px auto auto;
   gap: 12px;
   align-items: end;
 }
@@ -1082,6 +1110,7 @@ select {
 }
 
 .browser-shot-card {
+  width: 100%;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1091,6 +1120,28 @@ select {
   cursor: pointer;
   padding: 0;
   text-align: left;
+}
+
+.browser-shot-wrap {
+  position: relative;
+}
+
+.shot-select {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 900;
+  box-shadow: var(--shadow);
 }
 
 .browser-shot-card:hover {

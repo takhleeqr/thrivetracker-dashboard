@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { AppSettings } from "@/lib/settings-data";
-import { dateInputValue, formatTime, startOfDayIso, todayDateInputValue, zonedDateTimeToUtc } from "@/lib/timezone";
+import { dateInputValue, endOfDayIso, formatTime, startOfDayIso, todayDateInputValue, zonedDateTimeToUtc } from "@/lib/timezone";
 
 export type Profile = {
   id: string;
@@ -190,12 +190,15 @@ export async function loadDashboardSummary(
   supabase: SupabaseClient,
   timezone = "Asia/Karachi",
   settings?: Partial<Pick<AppSettings, "late_start_time" | "work_end_time" | "low_activity_threshold" | "low_activity_minimum_minutes">>,
-  options: { includePersistedAlerts?: boolean } = {},
+  options: { includePersistedAlerts?: boolean; range?: DetailDateRange } = {},
 ): Promise<DashboardSummary> {
-  const includePersistedAlerts = options.includePersistedAlerts ?? true;
+  const includePersistedAlerts = options.includePersistedAlerts ?? false;
   const todayStart = startOfTodayIso(timezone);
   const todayEnd = new Date().toISOString();
   const weekStart = currentWeekRange(timezone).start;
+  const selectedRange = options.range ?? { start: todayStart, end: todayEnd };
+  const queryStart = earliestIso([selectedRange.start, todayStart, weekStart]);
+  const queryEnd = latestIso([selectedRange.end, todayEnd]);
   const activitySince = minutesAgoIso(RECENT_ACTIVITY_MINUTES);
 
   const [profilesResult, projectsResult, entriesResult, activityResult, screenshotsResult, persistedAlertsResult] = await Promise.all([
@@ -209,17 +212,20 @@ export async function loadDashboardSummary(
     supabase
       .from("time_entries")
       .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason")
-      .gte("started_at", weekStart),
+      .lte("started_at", queryEnd)
+      .or(`stopped_at.is.null,stopped_at.gte.${queryStart}`),
     supabase
       .from("activity_logs")
       .select("id,user_id,time_entry_id,timestamp,activity_percent")
-      .gte("timestamp", todayStart)
+      .gte("timestamp", earliestIso([selectedRange.start, todayStart]))
+      .lte("timestamp", queryEnd)
       .order("timestamp", { ascending: false })
       .limit(1000),
     supabase
       .from("screenshots")
       .select("id,user_id,time_entry_id,project_id,captured_at,storage_key,file_size_bytes,activity_percent_at_capture")
-      .gte("captured_at", todayStart)
+      .gte("captured_at", selectedRange.start)
+      .lte("captured_at", selectedRange.end)
       .order("captured_at", { ascending: false })
       .limit(500),
     supabase
@@ -260,13 +266,14 @@ export async function loadDashboardSummary(
     const activeEntry = userEntries.find((entry) => !entry.stopped_at) ?? null;
     const latestEntry = newestEntry(userEntries);
     const userLogs = activityLogs.filter((log) => log.user_id === profile.id);
+    const userRangeLogs = userLogs.filter((log) => isWithinRange(log.timestamp, selectedRange));
     const latestLog = newestActivity(userLogs);
     const recentLogs = userLogs.filter((log) => new Date(log.timestamp).getTime() >= new Date(activitySince).getTime());
-    const activityPercent = averageActivity(recentLogs) ?? latestLog?.activity_percent ?? null;
+    const activityPercent = averageActivity(userRangeLogs) ?? latestLog?.activity_percent ?? null;
     const baseStatus = getStatus(activeEntry, latestEntry, profile.last_seen_at, now);
     const status = getDisplayStatus(profile, activeEntry, userTodayEntries, baseStatus, timezone);
     const scheduleStatus = getScheduleStatus(profile, userTodayEntries, timezone, settings?.late_start_time ?? "10:00", settings?.work_end_time ?? "17:00", now);
-    const hoursTodaySeconds = totalSecondsInRange(userEntries, { start: todayStart, end: todayEnd }, now, profile.last_seen_at, status);
+    const hoursTodaySeconds = totalSecondsInRange(userEntries, selectedRange, now, profile.last_seen_at, status);
     const weeklyHoursSeconds = totalSecondsInRange(userEntries, currentWeekRange(timezone), now, profile.last_seen_at, status);
     const hourlyRate = Number(profile.hourly_rate ?? 0);
     const lowActivityThreshold = Number(settings?.low_activity_threshold ?? LOW_ACTIVITY_THRESHOLD);
@@ -348,7 +355,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult] = await Promise.all([
     supabase
       .from("profiles")
-      .select("id,email,full_name,role,is_active,last_seen_at")
+      .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate")
       .eq("id", userId)
       .eq("role", "va")
       .maybeSingle(),
@@ -456,6 +463,19 @@ function currentMonthRange(timezone: string): DetailDateRange {
 
 function startOfTodayIso(timezone: string): string {
   return startOfDayIso(todayDateInputValue(timezone), timezone);
+}
+
+function earliestIso(values: string[]): string {
+  return values.reduce((earliest, value) => (new Date(value).getTime() < new Date(earliest).getTime() ? value : earliest));
+}
+
+function latestIso(values: string[]): string {
+  return values.reduce((latest, value) => (new Date(value).getTime() > new Date(latest).getTime() ? value : latest));
+}
+
+function isWithinRange(value: string, range: DetailDateRange) {
+  const timestamp = new Date(value).getTime();
+  return timestamp >= new Date(range.start).getTime() && timestamp <= new Date(range.end).getTime();
 }
 
 function minutesAgoIso(minutes: number): string {

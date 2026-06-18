@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Camera, Download, Filter, RefreshCw, X } from "lucide-react";
+import { Camera, Download, Filter, RefreshCw, Trash2, X } from "lucide-react";
 import { Button, Card, Input, ModalFrame, Select } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatPercent } from "@/lib/format";
@@ -34,6 +34,7 @@ export default function ScreenshotsPage() {
   const [projects, setProjects] = useState<ScreenshotOption[]>([]);
   const [items, setItems] = useState<ScreenshotBrowserItem[]>([]);
   const [selected, setSelected] = useState<ScreenshotBrowserItem | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
@@ -105,6 +106,7 @@ export default function ScreenshotsPage() {
       });
 
       setItems((previous) => (offset === 0 ? result.items : [...previous, ...result.items]));
+      if (offset === 0) setSelectedIds(new Set());
       setHasMore(result.hasMore);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
@@ -113,6 +115,45 @@ export default function ScreenshotsPage() {
       setIsLoading(false);
       setIsLoadingMore(false);
     }
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }
+
+  async function deleteSelectedScreenshots() {
+    if (!selectedIds.size) return;
+    const confirmed = window.confirm(`Delete ${selectedIds.size} selected screenshot(s)? This cannot be undone.`);
+    if (!confirmed) return;
+
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+
+    const response = await fetch("/api/screenshots/bulk-delete", {
+      body: JSON.stringify({ ids: [...selectedIds] }),
+      headers: {
+        authorization: `Bearer ${session?.access_token ?? ""}`,
+        "content-type": "application/json",
+      },
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      setError(await response.text());
+      return;
+    }
+
+    setSelectedIds(new Set());
+    await refreshScreenshots(0);
   }
 
   return (
@@ -194,27 +235,37 @@ export default function ScreenshotsPage() {
             <Button onClick={() => refreshScreenshots(0)} type="button">
               Apply
             </Button>
+            <Button disabled={!selectedIds.size} onClick={deleteSelectedScreenshots} type="button" variant="secondary">
+              <Trash2 size={16} />
+              Delete Selected
+            </Button>
           </div>
         </Card>
 
         <section className="browser-grid" aria-label="Screenshot results">
           {items.length ? (
             items.map((item) => (
-              <button className="browser-shot-card" key={item.id} onClick={() => setSelected(item)} type="button">
-                {item.signedUrl ? (
-                  <img alt={`Screenshot by ${item.vaName}`} src={item.signedUrl} />
-                ) : (
-                  <div className="screenshot-missing">Signed URL unavailable</div>
-                )}
-                <span>
-                  <strong>{item.vaName}</strong>
-                  <small>{item.projectName}</small>
-                </span>
-                <span>
-                  <small>{formatDateTimeFull(item.captured_at, timezone)}</small>
-                  <small>{item.activity_percent_at_capture === null ? "Activity -" : formatPercent(item.activity_percent_at_capture)}</small>
-                </span>
-              </button>
+              <div className="browser-shot-wrap" key={item.id}>
+                <label className="shot-select">
+                  <input checked={selectedIds.has(item.id)} onChange={() => toggleSelected(item.id)} type="checkbox" />
+                  Select
+                </label>
+                <button className="browser-shot-card" onClick={() => setSelected(item)} type="button">
+                  {item.signedUrl ? (
+                    <img alt={`Screenshot by ${item.vaName}`} src={item.signedUrl} />
+                  ) : (
+                    <div className="screenshot-missing">Signed URL unavailable</div>
+                  )}
+                  <span>
+                    <strong>{item.vaName}</strong>
+                    <small>{item.projectName}</small>
+                  </span>
+                  <span>
+                    <small>{formatDateTimeFull(item.captured_at, timezone)}</small>
+                    <small>{item.activity_percent_at_capture === null ? "Activity -" : formatPercent(item.activity_percent_at_capture)}</small>
+                  </span>
+                </button>
+              </div>
             ))
           ) : (
             <Card className="detail-card empty-state browser-empty">
@@ -280,4 +331,3 @@ function downloadScreenshot(url: string, storageKey: string) {
   link.download = storageKey.split("/").pop() || "screenshot.jpg";
   link.click();
 }
-

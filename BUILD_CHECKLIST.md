@@ -582,4 +582,6 @@ Done when: standalone per-company deployment is proven.
 - [x] Add protected background alert endpoint and cron-job.org deployment guide.
 - [x] Add Team Reactivate button for inactive VAs and Overview Needs Attention filter chip.
 - [x] Add production deployment guide and production verification checklist.
+- [x] Fix VA Detail earnings, server-side desktop start timestamps, manual breaks, Overview ranges, chart labels, retention cleanup, and bulk screenshot deletion.
+- [x] Add VA Detail live 30-second refresh range, Overview screenshot lightbox, and live settings-based alert recalculation.
 - [ ] Start Phase 5.1 end-to-end testing.

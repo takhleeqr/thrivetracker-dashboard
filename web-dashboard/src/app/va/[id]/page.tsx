@@ -76,12 +76,15 @@ export default function VaDetailPage() {
 
     boot();
 
-    const intervalId = window.setInterval(() => refreshData(selectedRange), 30_000);
+    const intervalId = window.setInterval(
+      () => refreshData(buildDateRange(rangeMode, customStart, customEnd, timezone), timezone),
+      30_000,
+    );
     return () => {
       isMounted = false;
       window.clearInterval(intervalId);
     };
-  }, [router, selectedRange, userId]);
+  }, [customEnd, customStart, rangeMode, router, timezone, userId]);
 
   async function refreshData(range = selectedRange, selectedTimezone = timezone) {
     try {
@@ -513,11 +516,9 @@ function Timeline({
   return (
     <div className="timeline">
       <div className="timeline-axis">
-        <span>{formatDate(rangeStart, timezone)}</span>
-        <span>25%</span>
-        <span>50%</span>
-        <span>75%</span>
-        <span>{formatDate(rangeEnd, timezone)}</span>
+        {timelineAxisLabels(rangeStart, rangeEnd, timezone).map((label) => (
+          <span key={label}>{label}</span>
+        ))}
       </div>
       <div className="timeline-track">
         {segments.map((segment) => {
@@ -559,7 +560,10 @@ function ActivityChart({ logs, timezone }: { logs: ActivityLog[]; timezone: stri
 
   const sampledLogs = sampleLogs(logs, 72);
 
+  const axisLogs = activityAxisLabels(sampledLogs, timezone);
+
   return (
+    <>
     <div className="activity-chart" aria-label="Activity percentage chart">
       {sampledLogs.map((log) => (
         <span
@@ -570,6 +574,12 @@ function ActivityChart({ logs, timezone }: { logs: ActivityLog[]; timezone: stri
         />
       ))}
     </div>
+    <div className="activity-axis">
+      {axisLogs.map((label) => (
+        <span key={label}>{label}</span>
+      ))}
+    </div>
+    </>
   );
 }
 
@@ -783,6 +793,19 @@ function inputFromDate(date: Date): string {
   const month = `${date.getMonth() + 1}`.padStart(2, "0");
   const day = `${date.getDate()}`.padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function timelineAxisLabels(rangeStart: string, rangeEnd: string, timezone: string) {
+  const start = new Date(rangeStart).getTime();
+  const end = new Date(rangeEnd).getTime();
+  const span = Math.max(1, end - start);
+  return [0, 0.25, 0.5, 0.75, 1].map((ratio) => formatTime(new Date(start + span * ratio), timezone));
+}
+
+function activityAxisLabels(logs: ActivityLog[], timezone: string) {
+  if (!logs.length) return [];
+  const indexes = [0, 0.25, 0.5, 0.75, 1].map((ratio) => Math.min(logs.length - 1, Math.round((logs.length - 1) * ratio)));
+  return [...new Set(indexes)].map((index) => formatTime(logs[index].timestamp, timezone));
 }
 
 function rangeLabel(range: DetailDateRange, timezone: string) {
