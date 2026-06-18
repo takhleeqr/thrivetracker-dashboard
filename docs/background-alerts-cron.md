@@ -4,9 +4,9 @@ This makes Late, No Show, stale heartbeat, crash, and low-activity alerts update
 
 ## What Was Added
 
-- `web-dashboard/vercel.json` schedules `/api/alerts/recalculate` every 5 minutes.
 - `web-dashboard/src/app/api/alerts/recalculate/route.ts` recalculates alerts and stores them in `dashboard_alerts`.
 - `supabase/migrations/004_dashboard_alerts.sql` creates the persisted alerts table.
+- `CRON_SECRET` protects the endpoint from public use.
 
 ## One-Time Setup
 
@@ -19,6 +19,29 @@ This makes Late, No Show, stale heartbeat, crash, and low-activity alerts update
    - `NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET=screenshots`
    - `CRON_SECRET`
 3. Redeploy the production dashboard.
+4. Create a cron-job.org job that calls the alert endpoint every 5 minutes.
+
+## cron-job.org Setup
+
+1. Open `https://cron-job.org`.
+2. Create a free account or log in.
+3. Click `Create cronjob`.
+4. Use this URL:
+
+```text
+https://your-vercel-domain.vercel.app/api/alerts/recalculate
+```
+
+5. Set schedule to every `5 minutes`.
+6. Set method to `GET`.
+7. Add this request header:
+
+```text
+Authorization: Bearer your-cron-secret
+```
+
+8. Save the cron job.
+9. Run it once manually from cron-job.org to confirm it returns success.
 
 ## Manual Test
 
@@ -43,6 +66,7 @@ Expected result:
 
 ## Notes
 
-- Vercel Cron only runs on production deployments.
-- The route also accepts Vercel's production cron request automatically.
-- The `CRON_SECRET` is still useful for manual tests and external schedulers.
+- Vercel Hobby plan does not support the cron schedule we need.
+- `web-dashboard/vercel.json` intentionally does not contain a `crons` section.
+- cron-job.org will call the protected endpoint every 5 minutes.
+- Keep `CRON_SECRET` private.

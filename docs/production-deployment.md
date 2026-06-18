@@ -98,13 +98,9 @@ If the dashboard opens but data is missing, check:
 
 ## Step 6: Confirm Background Alerts Cron
 
-The project includes:
+We are using `cron-job.org`, not Vercel Cron, because Vercel Hobby can block deployments with cron schedules.
 
-```text
-web-dashboard/vercel.json
-```
-
-It calls:
+Create a cron-job.org job that calls:
 
 ```text
 /api/alerts/recalculate
@@ -112,7 +108,17 @@ It calls:
 
 every 5 minutes.
 
-Vercel Cron only runs on production deployments. It does not run on preview deployments.
+Use full URL:
+
+```text
+https://your-vercel-domain.vercel.app/api/alerts/recalculate
+```
+
+Add this request header:
+
+```text
+Authorization: Bearer your-cron-secret
+```
 
 Manual test from PowerShell:
 

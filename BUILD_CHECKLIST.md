@@ -579,7 +579,7 @@ Done when: standalone per-company deployment is proven.
 - [x] Add Overview schedule status, day-off handling, earnings today, and weekly hours progress.
 - [x] Add productivity score explanations, semantic stat colors, unproductive app badges, and consecutive low-activity alerts.
 - [x] Add persisted dashboard alerts table and protected background recalculation API.
-- [x] Add Vercel Cron config and background alert deployment guide.
+- [x] Add protected background alert endpoint and cron-job.org deployment guide.
 - [x] Add Team Reactivate button for inactive VAs and Overview Needs Attention filter chip.
 - [x] Add production deployment guide and production verification checklist.
 - [ ] Start Phase 5.1 end-to-end testing.

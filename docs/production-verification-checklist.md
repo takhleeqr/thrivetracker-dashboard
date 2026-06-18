@@ -45,7 +45,8 @@ Use this after deployment. Do not skip the boring checks; boring checks catch ex
 ## 5. Background Alerts
 
 - [ ] Manual cron test returns `{ "ok": true }`.
-- [ ] Vercel Cron appears in production deployment.
+- [ ] cron-job.org job is created and enabled.
+- [ ] cron-job.org job has `Authorization: Bearer your-cron-secret` header.
 - [ ] `dashboard_alerts` receives rows when alerts exist.
 - [ ] Resolved alerts become inactive.
 - [ ] Overview `Needs Attention` filter shows VAs with alerts.
