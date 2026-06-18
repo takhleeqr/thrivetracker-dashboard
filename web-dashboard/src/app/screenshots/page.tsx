@@ -42,9 +42,8 @@ export default function ScreenshotsPage() {
   const [userId, setUserId] = useState("");
   const [projectId, setProjectId] = useState("");
   const [timezone, setTimezone] = useState("Asia/Karachi");
-  const [date, setDate] = useState(todayDateInputValue("Asia/Karachi"));
-  const [startTime, setStartTime] = useState("");
-  const [endTime, setEndTime] = useState("");
+  const [startDate, setStartDate] = useState(todayDateInputValue("Asia/Karachi"));
+  const [endDate, setEndDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
 
   useEffect(() => {
@@ -78,17 +77,18 @@ export default function ScreenshotsPage() {
 
   const currentFilter = useMemo(
     () => ({
-      date,
-      endTime: endTime || undefined,
+      endDate,
       limit: PAGE_SIZE,
       offset: 0,
       projectId: projectId || undefined,
-      startTime: startTime || undefined,
+      startDate,
       timezone,
       userId: userId || undefined,
     }),
-    [date, endTime, projectId, startTime, timezone, userId],
+    [endDate, projectId, startDate, timezone, userId],
   );
+
+  const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id));
 
   async function refreshScreenshots(offset: number, selectedTimezone = timezone) {
     try {
@@ -124,6 +124,17 @@ export default function ScreenshotsPage() {
         next.delete(id);
       } else {
         next.add(id);
+      }
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    setSelectedIds((previous) => {
+      if (allVisibleSelected) return new Set();
+      const next = new Set(previous);
+      for (const item of items) {
+        next.add(item.id);
       }
       return next;
     });
@@ -221,19 +232,18 @@ export default function ScreenshotsPage() {
               </Select>
             </label>
             <label>
-              Date
-              <Input onChange={(event) => setDate(event.target.value)} type="date" value={date} />
+              From date
+              <Input onChange={(event) => setStartDate(event.target.value)} type="date" value={startDate} />
             </label>
             <label>
-              Start
-              <Input onChange={(event) => setStartTime(event.target.value)} type="time" value={startTime} />
-            </label>
-            <label>
-              End
-              <Input onChange={(event) => setEndTime(event.target.value)} type="time" value={endTime} />
+              To date
+              <Input onChange={(event) => setEndDate(event.target.value)} type="date" value={endDate} />
             </label>
             <Button onClick={() => refreshScreenshots(0)} type="button">
               Apply
+            </Button>
+            <Button disabled={!items.length} onClick={toggleSelectAllVisible} type="button" variant="secondary">
+              {allVisibleSelected ? "Deselect All" : "Select All"}
             </Button>
             <Button disabled={!selectedIds.size} onClick={deleteSelectedScreenshots} type="button" variant="secondary">
               <Trash2 size={16} />
@@ -271,7 +281,7 @@ export default function ScreenshotsPage() {
             <Card className="detail-card empty-state browser-empty">
               <Camera size={28} />
               <strong>{isLoading ? "Loading screenshots" : "No screenshots found"}</strong>
-              <p>Try a different VA, project, date, or time range.</p>
+              <p>Try a different VA, project, or date range.</p>
             </Card>
           )}
         </section>

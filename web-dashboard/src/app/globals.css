@@ -529,6 +529,11 @@ select {
   color: var(--amber);
 }
 
+.status-on_break {
+  background: #fef3c7;
+  color: #b45309;
+}
+
 .status-offline {
   background: #f3f0eb;
   color: var(--muted);
@@ -875,11 +880,13 @@ select {
 
 .compact-table {
   margin-top: 18px;
+  overflow-x: auto;
 }
 
 .detail-table-head,
 .detail-table-row {
-  grid-template-columns: 1fr 0.8fr 0.8fr 0.8fr 0.7fr;
+  grid-template-columns: 160px 130px 130px 95px 190px 100px 95px 80px 80px 70px 70px;
+  min-width: 1300px;
 }
 
 .payroll-table-row {

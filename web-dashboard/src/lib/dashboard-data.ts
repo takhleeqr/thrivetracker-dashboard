@@ -29,7 +29,7 @@ export type TimeEntry = {
   duration_seconds: number | null;
   is_manual?: boolean;
   manual_note?: string | null;
-  stop_reason: "manual" | "idle" | "app_close" | "crash" | null;
+  stop_reason: "manual" | "idle" | "app_close" | "crash" | "break" | null;
 };
 
 export type ActivityLog = {
@@ -76,6 +76,16 @@ export type AppUsage = {
   averageActivityPercent: number;
 };
 
+export type TimeEntryWithMetrics = TimeEntry & {
+  averageActivityPercent: number | null;
+  idleMinutes: number;
+  productivityScore: number;
+  projectName: string;
+  screenshotsTaken: number;
+  totalKeystrokes: number;
+  totalMouseClicks: number;
+};
+
 export type VaDetail = {
   profile: Profile;
   totalHoursTodaySeconds: number;
@@ -93,7 +103,7 @@ export type VaDetail = {
   appUsage: AppUsage[];
   dailyPay: Array<{ date: string; earnings: number; seconds: number }>;
   projectOptions: Project[];
-  timeEntries: Array<TimeEntry & { projectName: string }>;
+  timeEntries: TimeEntryWithMetrics[];
   rangeStart: string;
   rangeEnd: string;
 };
@@ -107,7 +117,7 @@ export type DashboardRow = {
   userId: string;
   name: string;
   email: string;
-  status: "online" | "idle" | "offline" | "day_off";
+  status: "online" | "idle" | "offline" | "day_off" | "on_break";
   scheduleStatus: "on_time" | "late" | "no_show" | "day_off" | "not_set";
   currentProject: string;
   currentProjectId: string | null;
@@ -271,7 +281,7 @@ export async function loadDashboardSummary(
     const recentLogs = userLogs.filter((log) => new Date(log.timestamp).getTime() >= new Date(activitySince).getTime());
     const activityPercent = averageActivity(userRangeLogs) ?? latestLog?.activity_percent ?? null;
     const baseStatus = getStatus(activeEntry, latestEntry, profile.last_seen_at, now);
-    const status = getDisplayStatus(profile, activeEntry, userTodayEntries, baseStatus, timezone);
+    const status = getDisplayStatus(profile, activeEntry, latestEntry, userTodayEntries, baseStatus, timezone, now);
     const scheduleStatus = getScheduleStatus(profile, userTodayEntries, timezone, settings?.late_start_time ?? "10:00", settings?.work_end_time ?? "17:00", now);
     const hoursTodaySeconds = totalSecondsInRange(userEntries, selectedRange, now, profile.last_seen_at, status);
     const weeklyHoursSeconds = totalSecondsInRange(userEntries, currentWeekRange(timezone), now, profile.last_seen_at, status);
@@ -292,14 +302,16 @@ export async function loadDashboardSummary(
     });
     const rowAlerts = mergeAlerts(calculatedAlerts, persistedAlertsByUser.get(profile.id) ?? []);
 
+    const displayProjectEntry = activeEntry ?? (status === "on_break" ? latestEntry : null);
+
     return {
       userId: profile.id,
       name: profile.full_name,
       email: profile.email,
       status,
       scheduleStatus,
-      currentProject: activeEntry?.project_id ? projectNames.get(activeEntry.project_id) ?? "Assigned Project" : "-",
-      currentProjectId: activeEntry?.project_id ?? null,
+      currentProject: displayProjectEntry?.project_id ? projectNames.get(displayProjectEntry.project_id) ?? "Assigned Project" : "-",
+      currentProjectId: displayProjectEntry?.project_id ?? null,
       hoursTodaySeconds,
       weeklyHoursSeconds,
       expectedWeekSeconds: Math.round(Number(profile.expected_hours_per_week ?? 0) * 3600),
@@ -320,7 +332,7 @@ export async function loadDashboardSummary(
   const totalHoursTodaySeconds = rows.reduce((sum, row) => sum + row.hoursTodaySeconds, 0);
   const totalHoursWeekSeconds = rows.reduce((sum, row) => sum + row.weeklyHoursSeconds, 0);
   const totalEarningsToday = rows.reduce((sum, row) => sum + row.earningsToday, 0);
-  const onlineRows = rows.filter((row) => row.status === "online");
+  const onlineRows = rows.filter((row) => row.status === "online" || row.status === "on_break");
   const averageActivityPercent = averageActivity(
     rows
       .filter((row) => row.activityPercent !== null)
@@ -385,7 +397,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
       .gte("captured_at", selectedRange.start)
       .lte("captured_at", selectedRange.end)
       .order("captured_at", { ascending: false })
-      .limit(60),
+      .limit(1000),
   ]);
 
   if (profileResult.error) throw profileResult.error;
@@ -401,7 +413,9 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   const assignedProjectIds = new Set((assignmentsResult.data ?? []).map((assignment) => assignment.project_id as string));
   const entries = (entriesResult.data ?? []) as TimeEntry[];
   const activityLogs = (activityResult.data ?? []) as ActivityLog[];
-  const screenshots = await addSignedScreenshotUrls(supabase, (screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[]);
+  const screenshotRows = (screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[];
+  const screenshots = await addSignedScreenshotUrls(supabase, screenshotRows.slice(0, 60));
+  const screenshotsForMetrics = screenshotRows.map((screenshot) => ({ ...screenshot, signedUrl: null }));
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
   const activeEntry = entries.find((entry) => !entry.stopped_at) ?? null;
   const latestEntry = newestEntry(entries);
@@ -421,7 +435,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
     earningsThisMonth: earningsForSeconds(monthSeconds, hourlyRate),
     averageActivityPercent: averageActivity(activityLogs) ?? 0,
     productivityScore: productivityScore(averageActivity(activityLogs) ?? 0),
-    screenshotCount: screenshots.length,
+    screenshotCount: screenshotRows.length,
     lastSeenAt: profile.last_seen_at,
     timeline: entries.map((entry) => toTimelineSegment(entry, projectNames, selectedRange, profile.last_seen_at, status)),
     screenshots,
@@ -433,6 +447,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
       .sort((first, second) => first.name.localeCompare(second.name)),
     timeEntries: entries.map((entry) => ({
       ...entry,
+      ...timeEntryMetrics(entry, activityLogs, screenshotsForMetrics),
       projectName: entry.project_id ? projectNames.get(entry.project_id) ?? "Assigned Project" : "-",
     })),
     rangeStart: selectedRange.start,
@@ -493,9 +508,11 @@ function newestActivity(logs: ActivityLog[]): ActivityLog | null {
 function getDisplayStatus(
   profile: Profile,
   activeEntry: TimeEntry | null,
+  latestEntry: TimeEntry | null,
   todayEntries: TimeEntry[],
   baseStatus: DashboardRow["status"],
   timezone: string,
+  now: number,
 ): DashboardRow["status"] {
   const workingDays = profile.working_days ?? [];
   if (workingDays.length && !workingDays.includes(weekdayKey(new Date(), timezone))) {
@@ -503,6 +520,10 @@ function getDisplayStatus(
   }
 
   if (activeEntry && baseStatus === "online") return "online";
+  if (latestEntry?.stop_reason === "break" && profile.last_seen_at) {
+    const lastSeenAgeMinutes = (now - new Date(profile.last_seen_at).getTime()) / 60000;
+    if (lastSeenAgeMinutes <= ONLINE_HEARTBEAT_MINUTES) return "on_break";
+  }
   if (todayEntries.length) return "idle";
   return "offline";
 }
@@ -661,6 +682,20 @@ function lowActivityStreakMinutes(logs: ActivityLog[], threshold: number): numbe
 function productivityScore(activityPercent: number | null): number {
   if (activityPercent === null) return 0;
   return Math.max(0, Math.min(100, Math.round(activityPercent)));
+}
+
+function timeEntryMetrics(entry: TimeEntry, logs: ActivityLog[], screenshots: Screenshot[]) {
+  const entryLogs = logs.filter((log) => log.time_entry_id === entry.id);
+  const averageActivityPercent = averageActivity(entryLogs);
+
+  return {
+    averageActivityPercent,
+    idleMinutes: entryLogs.filter((log) => Number(log.activity_percent ?? 0) === 0).length,
+    productivityScore: productivityScore(averageActivityPercent),
+    screenshotsTaken: screenshots.filter((screenshot) => screenshot.time_entry_id === entry.id).length,
+    totalKeystrokes: entryLogs.reduce((sum, log) => sum + Number(log.keystrokes_count ?? 0), 0),
+    totalMouseClicks: entryLogs.reduce((sum, log) => sum + Number(log.mouse_clicks_count ?? 0), 0),
+  };
 }
 
 function latestScreenshotPerUser(screenshots: Array<Omit<Screenshot, "signedUrl">>) {

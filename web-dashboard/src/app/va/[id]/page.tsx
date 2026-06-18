@@ -353,6 +353,12 @@ export default function VaDetailPage() {
                   <span>Stop</span>
                   <span>Duration</span>
                   <span>Reason</span>
+                  <span>Avg Activity</span>
+                  <span>Keystrokes</span>
+                  <span>Clicks</span>
+                  <span>Idle Min</span>
+                  <span>Shots</span>
+                  <span>Score</span>
                 </div>
                 {detail.timeEntries.length ? (
                   detail.timeEntries.map((entry) => (
@@ -363,8 +369,14 @@ export default function VaDetailPage() {
                       <span>{formatHours(entry.duration_seconds ?? runningDuration(entry.started_at, detail.lastSeenAt, detail.rangeEnd))}</span>
                       <span>
                         {entry.is_manual ? <b className="manual-badge">Manual</b> : null}
-                        {entry.manual_note ?? entry.stop_reason ?? "running"}
+                        {stopReasonLabel(entry)}
                       </span>
+                      <span>{entry.averageActivityPercent === null ? "-" : formatPercent(entry.averageActivityPercent)}</span>
+                      <span>{entry.totalKeystrokes}</span>
+                      <span>{entry.totalMouseClicks}</span>
+                      <span>{entry.idleMinutes}</span>
+                      <span>{entry.screenshotsTaken}</span>
+                      <span>{entry.productivityScore}</span>
                     </div>
                   ))
                 ) : (
@@ -663,6 +675,17 @@ function timelinePosition(segment: TimelineSegment, rangeStart: string, rangeEnd
 function runningDuration(startedAt: string, lastSeenAt: string | null, rangeEnd: string) {
   const endAt = Math.min(lastSeenAt ? new Date(lastSeenAt).getTime() : Date.now(), new Date(rangeEnd).getTime());
   return Math.max(0, Math.floor((endAt - new Date(startedAt).getTime()) / 1000));
+}
+
+function stopReasonLabel(entry: VaDetail["timeEntries"][number]) {
+  if (entry.is_manual) return "Manual entry";
+  if (!entry.stopped_at) return "Running";
+  if (entry.stop_reason === "manual") return "Stopped by VA";
+  if (entry.stop_reason === "idle") return "Auto-stopped: idle timeout";
+  if (entry.stop_reason === "app_close") return "App closed";
+  if (entry.stop_reason === "crash") return "Auto-closed: possible crash";
+  if (entry.stop_reason === "break") return "Break started";
+  return "Stopped";
 }
 
 function sampleLogs(logs: ActivityLog[], maxBars: number) {

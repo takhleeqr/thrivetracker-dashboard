@@ -1,12 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { endOfDayIso, startOfDayIso, zonedDateTimeToUtc } from "@/lib/timezone";
+import { endOfDayIso, startOfDayIso } from "@/lib/timezone";
 
 export type ScreenshotFilter = {
   userId?: string;
   projectId?: string;
-  date: string;
-  startTime?: string;
-  endTime?: string;
+  startDate: string;
+  endDate: string;
   timezone?: string;
   offset: number;
   limit: number;
@@ -123,8 +122,10 @@ export async function loadScreenshots(
 
 function buildScreenshotRange(filter: ScreenshotFilter) {
   const timezone = filter.timezone ?? "Asia/Karachi";
-  const start = filter.startTime ? zonedDateTimeToUtc(filter.date, filter.startTime, timezone).toISOString() : startOfDayIso(filter.date, timezone);
-  const end = filter.endTime ? zonedDateTimeToUtc(filter.date, filter.endTime, timezone, 59, 999).toISOString() : endOfDayIso(filter.date, timezone);
+  const startDate = filter.startDate;
+  const endDate = new Date(filter.endDate).getTime() < new Date(startDate).getTime() ? startDate : filter.endDate;
+  const start = startOfDayIso(startDate, timezone);
+  const end = endOfDayIso(endDate, timezone);
 
   return {
     start,

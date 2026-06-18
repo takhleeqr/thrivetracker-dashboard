@@ -44,7 +44,7 @@ export default function DashboardHome() {
   const router = useRouter();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
-  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "online" | "idle" | "offline" | "low" | "attention">("active");
+  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "online" | "idle" | "on_break" | "offline" | "low" | "attention">("active");
   const [projectFilter, setProjectFilter] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -53,9 +53,13 @@ export default function DashboardHome() {
   const [timezone, setTimezone] = useState("Asia/Karachi");
   const [dashboardSettings, setDashboardSettings] = useState<AppSettings>(defaultSettings);
   const [rangeMode, setRangeMode] = useState<OverviewRangeMode>("today");
-  const [customDate, setCustomDate] = useState(todayDateInputValue("Asia/Karachi"));
+  const [customStartDate, setCustomStartDate] = useState(todayDateInputValue("Asia/Karachi"));
+  const [customEndDate, setCustomEndDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [selectedScreenshot, setSelectedScreenshot] = useState<OverviewScreenshot | null>(null);
-  const selectedRange = useMemo(() => buildOverviewRange(rangeMode, customDate, timezone), [customDate, rangeMode, timezone]);
+  const selectedRange = useMemo(
+    () => buildOverviewRange(rangeMode, customStartDate, customEndDate, timezone),
+    [customEndDate, customStartDate, rangeMode, timezone],
+  );
 
   useEffect(() => {
     let isMounted = true;
@@ -78,9 +82,14 @@ export default function DashboardHome() {
       setAdmin(profile);
       const settings = await loadSettings(supabase);
       setTimezone(settings.timezone);
-      setCustomDate(todayDateInputValue(settings.timezone));
+      setCustomStartDate(todayDateInputValue(settings.timezone));
+      setCustomEndDate(todayDateInputValue(settings.timezone));
       setDashboardSettings(settings);
-      await refreshData(settings.timezone, settings, buildOverviewRange(rangeMode, todayDateInputValue(settings.timezone), settings.timezone));
+      await refreshData(
+        settings.timezone,
+        settings,
+        buildOverviewRange(rangeMode, todayDateInputValue(settings.timezone), todayDateInputValue(settings.timezone), settings.timezone),
+      );
     }
 
     boot();
@@ -120,6 +129,7 @@ export default function DashboardHome() {
       if (statusFilter === "active" && (row.status === "offline" || row.status === "day_off")) return false;
       if (statusFilter === "online" && row.status !== "online") return false;
       if (statusFilter === "idle" && row.status !== "idle") return false;
+      if (statusFilter === "on_break" && row.status !== "on_break") return false;
       if (statusFilter === "offline" && row.status !== "offline") return false;
       if (statusFilter === "low" && !row.alerts.some((alert) => alert.type === "low_activity")) return false;
       if (statusFilter === "attention" && !row.alerts.length && row.scheduleStatus !== "late" && row.scheduleStatus !== "no_show") return false;
@@ -182,7 +192,10 @@ export default function DashboardHome() {
               <option value="custom">Custom</option>
             </Select>
             {rangeMode === "custom" ? (
-              <Input aria-label="Custom overview date" onChange={(event) => setCustomDate(event.target.value)} type="date" value={customDate} />
+              <>
+                <Input aria-label="Overview from date" onChange={(event) => setCustomStartDate(event.target.value)} type="date" value={customStartDate} />
+                <Input aria-label="Overview to date" onChange={(event) => setCustomEndDate(event.target.value)} type="date" value={customEndDate} />
+              </>
             ) : null}
             <Button onClick={() => refreshData(timezone, dashboardSettings, selectedRange)} type="button" variant="secondary">
               <RefreshCw size={16} />
@@ -250,8 +263,9 @@ export default function DashboardHome() {
               </Select>
               <Select onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} value={statusFilter}>
                 <option value="active">Active only</option>
-                <option value="online">Online</option>
-                <option value="idle">Idle</option>
+                <option value="online">Working</option>
+                <option value="idle">Paused</option>
+                <option value="on_break">On Break</option>
                 <option value="offline">Offline</option>
                 <option value="attention">Needs Attention</option>
                 <option value="low">Low activity</option>
@@ -299,10 +313,10 @@ function VaRow({ onScreenshotClick, row }: { onScreenshotClick: (item: OverviewS
       <span>
         <span className={`status-pill status-${row.status}`}>{statusLabel(row.status)}</span>
       </span>
+      <span>{row.currentProject}</span>
       <span>
         <span className={`schedule-pill schedule-${row.scheduleStatus}`}>{scheduleLabel(row.scheduleStatus)}</span>
       </span>
-      <span>{row.currentProject}</span>
       <span>{formatHours(row.hoursTodaySeconds)}</span>
       <span>{formatMoney(row.earningsToday)}</span>
       <span>
@@ -419,15 +433,18 @@ function scheduleLabel(status: DashboardRow["scheduleStatus"]) {
 }
 
 function statusLabel(status: DashboardRow["status"]) {
+  if (status === "online") return "Working";
+  if (status === "idle") return "Paused";
+  if (status === "on_break") return "On Break";
   if (status === "day_off") return "Day Off";
-  return status;
+  return "Offline";
 }
 
 function formatMoney(value: number) {
   return `$${value.toFixed(2)}`;
 }
 
-function buildOverviewRange(mode: OverviewRangeMode, customDate: string, timezone: string) {
+function buildOverviewRange(mode: OverviewRangeMode, customStartDate: string, customEndDate: string, timezone: string) {
   const todayInput = todayDateInputValue(timezone);
   let startInput = todayInput;
   let endInput = todayInput;
@@ -453,8 +470,11 @@ function buildOverviewRange(mode: OverviewRangeMode, customDate: string, timezon
   }
 
   if (mode === "custom") {
-    startInput = customDate || todayInput;
-    endInput = startInput;
+    startInput = customStartDate || todayInput;
+    endInput = customEndDate || startInput;
+    if (dateFromInput(endInput).getTime() < dateFromInput(startInput).getTime()) {
+      endInput = startInput;
+    }
   }
 
   return {

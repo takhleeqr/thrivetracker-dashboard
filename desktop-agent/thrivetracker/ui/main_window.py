@@ -56,12 +56,14 @@ class MainWindow(ttk.Frame):
         self.last_activity_percent: float | None = None
         self.idle_resume_project_id: str | None = None
         self.break_resume_project_id: str | None = None
+        self.break_started_at: datetime | None = None
         self.idle_minutes: int = 0
 
         self.project_var = tk.StringVar()
         self.timer_text = tk.StringVar(value="00:00:00")
         self.today_text = tk.StringVar(value="Today: 0h 00m")
         self.status_text = tk.StringVar(value="Stopped")
+        self.tracking_state_text = tk.StringVar(value="Ready")
         self.screenshot_text = tk.StringVar(value="Screenshots: ready")
         self.activity_text = tk.StringVar(value="Activity: ready")
         self.queue_text = tk.StringVar(value="Queue: 0 pending")
@@ -96,10 +98,7 @@ class MainWindow(ttk.Frame):
         self.break_button.pack(fill="x", pady=(0, 10))
 
         ttk.Label(self, textvariable=self.status_text, style="Status.TLabel").pack(anchor="center")
-        ttk.Label(self, textvariable=self.screenshot_text, style="Muted.TLabel").pack(anchor="center", pady=(4, 0))
-        ttk.Label(self, textvariable=self.activity_text, style="Muted.TLabel").pack(anchor="center", pady=(4, 0))
-        ttk.Label(self, textvariable=self.queue_text, style="Muted.TLabel").pack(anchor="center", pady=(4, 0))
-        ttk.Label(self, textvariable=self.settings_text, style="Muted.TLabel").pack(anchor="center", pady=(4, 0))
+        ttk.Label(self, textvariable=self.tracking_state_text, style="Muted.TLabel").pack(anchor="center", pady=(4, 0))
         ttk.Label(self, textvariable=self.error_text, style="Error.TLabel", wraplength=340).pack(anchor="w", pady=(8, 0))
 
         footer = ttk.Frame(self)
@@ -139,6 +138,8 @@ class MainWindow(ttk.Frame):
     def _toggle_timer(self) -> None:
         if self.active_entry:
             self._stop_timer("manual")
+        elif self.break_resume_project_id:
+            self._stop_break_shift()
         else:
             self._start_timer()
 
@@ -169,9 +170,11 @@ class MainWindow(ttk.Frame):
         self.active_entry = entry
         self.idle_resume_project_id = None
         self.break_resume_project_id = None
+        self.break_started_at = None
         self.last_activity_percent = None
         self.error_text.set("")
-        self.status_text.set("Recording")
+        self.status_text.set("Working")
+        self.tracking_state_text.set("Tracking in progress")
         self.screenshot_text.set("Screenshots: scheduled")
         self.button_text.set("Stop")
         self.break_button_text.set("Take Break")
@@ -218,12 +221,14 @@ class MainWindow(ttk.Frame):
         self.today_total_seconds += duration_seconds
         self.active_entry = None
         self.break_resume_project_id = None
+        self.break_started_at = None
         self._cancel_screenshot_schedule()
         self._cancel_idle_check()
         self._cancel_heartbeat()
         self._stop_activity_tracking()
         self.timer_text.set("00:00:00")
         self.status_text.set("Stopped")
+        self.tracking_state_text.set("Ready")
         self.screenshot_text.set("Screenshots: stopped")
         self.activity_text.set("Activity: stopped")
         self.button_text.set("Start")
@@ -245,9 +250,10 @@ class MainWindow(ttk.Frame):
 
         self.break_resume_project_id = self.active_entry.project_id
         self.status_text.set("On break")
+        self.tracking_state_text.set("On break")
         self.screenshot_text.set("Screenshots: paused")
         self.activity_text.set("Activity: paused")
-        self.button_text.set("Start")
+        self.button_text.set("Stop")
         self.break_button_text.set("Resume")
         self._cancel_screenshot_schedule()
         self._cancel_idle_check()
@@ -267,7 +273,7 @@ class MainWindow(ttk.Frame):
                 entry_id=entry.id,
                 stopped_at=stopped_at.isoformat(),
                 duration_seconds=duration_seconds,
-                reason="manual",
+                reason="break",
             )
             self.root.after(0, lambda: self._finish_break(duration_seconds))
         except Exception:
@@ -277,7 +283,7 @@ class MainWindow(ttk.Frame):
                     "entry_id": entry.id,
                     "stopped_at": stopped_at.isoformat(),
                     "duration_seconds": duration_seconds,
-                    "reason": "manual",
+                    "reason": "break",
                 },
             )
             self.root.after(0, lambda: (self._update_queue_text(), self._finish_break(duration_seconds)))
@@ -285,14 +291,17 @@ class MainWindow(ttk.Frame):
     def _finish_break(self, duration_seconds: int) -> None:
         self.today_total_seconds += duration_seconds
         self.active_entry = None
-        self.timer_text.set("00:00:00")
+        self.break_started_at = datetime.now(timezone.utc)
+        self.timer_text.set("On break: 00:00:00")
         self.status_text.set("On break")
-        self.button_text.set("Start")
+        self.tracking_state_text.set("On break")
+        self.button_text.set("Stop")
         self.break_button_text.set("Resume")
         self.break_button.configure(state="normal")
         self.project_combo.configure(state="disabled")
         self._update_today_text()
         self._set_busy(False)
+        self._send_heartbeat()
 
     def _resume_after_break(self) -> None:
         if not self.break_resume_project_id:
@@ -307,6 +316,18 @@ class MainWindow(ttk.Frame):
         self._set_busy(True, "Resuming...")
         self.break_button.configure(state="disabled")
         threading.Thread(target=self._start_timer_worker, args=(project,), daemon=True).start()
+
+    def _stop_break_shift(self) -> None:
+        self.break_resume_project_id = None
+        self.break_started_at = None
+        self._cancel_heartbeat()
+        self.timer_text.set("00:00:00")
+        self.status_text.set("Stopped")
+        self.tracking_state_text.set("Ready")
+        self.button_text.set("Start")
+        self.break_button_text.set("Take Break")
+        self.break_button.configure(state="disabled")
+        self.project_combo.configure(state="readonly")
 
     def stop_for_app_close(self) -> None:
         self._cancel_screenshot_schedule()
@@ -374,6 +395,7 @@ class MainWindow(ttk.Frame):
 
         self.idle_resume_project_id = self.active_entry.project_id
         self.status_text.set("Idle - paused")
+        self.tracking_state_text.set("Paused")
         self.screenshot_text.set("Screenshots: paused")
         self.activity_text.set("Activity: paused")
         self.button_text.set("Start")
@@ -399,6 +421,7 @@ class MainWindow(ttk.Frame):
         self.active_entry = None
         self.timer_text.set("00:00:00")
         self.status_text.set("Idle - paused")
+        self.tracking_state_text.set("Paused")
         self.button_text.set("Start")
         self.break_button.configure(state="disabled")
         self.project_combo.configure(state="readonly")
@@ -577,7 +600,7 @@ class MainWindow(ttk.Frame):
 
     def _send_heartbeat(self) -> None:
         self._cancel_heartbeat()
-        if not self.active_entry:
+        if not self.active_entry and not self.break_resume_project_id:
             return
 
         threading.Thread(target=self._heartbeat_worker, daemon=True).start()
@@ -591,7 +614,7 @@ class MainWindow(ttk.Frame):
             self.root.after(0, self._schedule_heartbeat)
 
     def _schedule_heartbeat(self) -> None:
-        if not self.active_entry:
+        if not self.active_entry and not self.break_resume_project_id:
             return
         self.heartbeat_after_id = self.root.after(2 * 60 * 1000, self._send_heartbeat)
 
@@ -680,11 +703,7 @@ class MainWindow(ttk.Frame):
     def _finish_settings_sync(self, settings: dict[str, str]) -> None:
         self.config = self.config.with_settings(settings)
         self.screenshots.quality = max(1, min(100, self.config.screenshot_quality))
-        self.settings_text.set(
-            "Settings: synced "
-            f"shots {self.config.screenshot_interval_minutes}m, "
-            f"idle {self.config.idle_timeout_minutes}m"
-        )
+        self.settings_text.set("Settings: synced")
         self._schedule_settings_sync()
 
     def _finish_settings_sync_error(self) -> None:
@@ -712,6 +731,9 @@ class MainWindow(ttk.Frame):
         if self.active_entry:
             elapsed = max(0, int((datetime.now(timezone.utc) - self.active_entry.started_at).total_seconds()))
             self.timer_text.set(format_duration(elapsed, show_seconds=True))
+        elif self.break_started_at:
+            elapsed = max(0, int((datetime.now(timezone.utc) - self.break_started_at).total_seconds()))
+            self.timer_text.set(f"On break: {format_duration(elapsed, show_seconds=True)}")
 
         self.root.after(1000, self._tick)
 
@@ -729,7 +751,7 @@ class MainWindow(ttk.Frame):
             self.button_text.set("Stop")
             self.break_button_text.set("Take Break")
         elif self.break_resume_project_id:
-            self.button_text.set("Start")
+            self.button_text.set("Stop")
             self.break_button_text.set("Resume")
         else:
             self.button_text.set("Start")
