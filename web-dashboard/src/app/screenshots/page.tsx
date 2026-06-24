@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { Camera, Download, Filter, RefreshCw, Trash2, X } from "lucide-react";
+import { Camera, ChevronLeft, ChevronRight, Download, Filter, RefreshCw, Trash2, X } from "lucide-react";
 import { Button, Card, Input, ModalFrame, Select } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatPercent } from "@/lib/format";
@@ -33,7 +33,7 @@ export default function ScreenshotsPage() {
   const [vas, setVas] = useState<ScreenshotOption[]>([]);
   const [projects, setProjects] = useState<ScreenshotOption[]>([]);
   const [items, setItems] = useState<ScreenshotBrowserItem[]>([]);
-  const [selected, setSelected] = useState<ScreenshotBrowserItem | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
@@ -89,6 +89,8 @@ export default function ScreenshotsPage() {
   );
 
   const allVisibleSelected = items.length > 0 && items.every((item) => selectedIds.has(item.id));
+  const selectedIndex = selectedId ? items.findIndex((item) => item.id === selectedId) : -1;
+  const selectedItem = selectedIndex >= 0 ? items[selectedIndex] : null;
 
   async function refreshScreenshots(offset: number, selectedTimezone = timezone) {
     try {
@@ -260,7 +262,7 @@ export default function ScreenshotsPage() {
                   <input checked={selectedIds.has(item.id)} onChange={() => toggleSelected(item.id)} type="checkbox" />
                   Select
                 </label>
-                <button className="browser-shot-card" onClick={() => setSelected(item)} type="button">
+                <button className="browser-shot-card" onClick={() => setSelectedId(item.id)} type="button">
                   {item.signedUrl ? (
                     <img alt={`Screenshot by ${item.vaName}`} src={item.signedUrl} />
                   ) : (
@@ -295,12 +297,49 @@ export default function ScreenshotsPage() {
         ) : null}
       </section>
 
-      {selected ? <ScreenshotLightbox item={selected} onClose={() => setSelected(null)} timezone={timezone} /> : null}
+      {selectedItem ? (
+        <ScreenshotLightbox
+          canGoNext={selectedIndex < items.length - 1}
+          canGoPrevious={selectedIndex > 0}
+          item={selectedItem}
+          onClose={() => setSelectedId(null)}
+          onNext={() => setSelectedId(items[selectedIndex + 1]?.id ?? null)}
+          onPrevious={() => setSelectedId(items[selectedIndex - 1]?.id ?? null)}
+          timezone={timezone}
+        />
+      ) : null}
     </main>
   );
 }
 
-function ScreenshotLightbox({ item, onClose, timezone }: { item: ScreenshotBrowserItem; onClose: () => void; timezone: string }) {
+function ScreenshotLightbox({
+  item,
+  onClose,
+  onNext,
+  onPrevious,
+  canGoNext,
+  canGoPrevious,
+  timezone,
+}: {
+  item: ScreenshotBrowserItem;
+  onClose: () => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  canGoNext: boolean;
+  canGoPrevious: boolean;
+  timezone: string;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft" && canGoPrevious) onPrevious();
+      if (event.key === "ArrowRight" && canGoNext) onNext();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canGoNext, canGoPrevious, onClose, onNext, onPrevious]);
+
   return (
     <div className="modal-backdrop screenshot-lightbox-backdrop">
       <ModalFrame className="screenshot-lightbox">
@@ -325,11 +364,31 @@ function ScreenshotLightbox({ item, onClose, timezone }: { item: ScreenshotBrows
             </button>
           </div>
         </div>
-        {item.signedUrl ? (
-          <img alt={`Screenshot by ${item.vaName}`} className="lightbox-image" src={item.signedUrl} />
-        ) : (
-          <div className="screenshot-missing lightbox-missing">Signed URL unavailable</div>
-        )}
+        <div className="lightbox-stage">
+          <button
+            aria-label="Previous screenshot"
+            className="lightbox-nav lightbox-nav-left"
+            disabled={!canGoPrevious}
+            onClick={onPrevious}
+            type="button"
+          >
+            <ChevronLeft size={20} />
+          </button>
+          {item.signedUrl ? (
+            <img alt={`Screenshot by ${item.vaName}`} className="lightbox-image" src={item.signedUrl} />
+          ) : (
+            <div className="screenshot-missing lightbox-missing">Signed URL unavailable</div>
+          )}
+          <button
+            aria-label="Next screenshot"
+            className="lightbox-nav lightbox-nav-right"
+            disabled={!canGoNext}
+            onClick={onNext}
+            type="button"
+          >
+            <ChevronRight size={20} />
+          </button>
+        </div>
       </ModalFrame>
     </div>
   );

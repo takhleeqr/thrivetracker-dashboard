@@ -1209,11 +1209,47 @@ select {
   gap: 10px;
 }
 
+.lightbox-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-top: 18px;
+}
+
+.lightbox-nav {
+  position: absolute;
+  top: 50%;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background: rgba(23, 23, 23, 0.56);
+  color: white;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+
+.lightbox-nav:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.lightbox-nav-left {
+  left: 14px;
+}
+
+.lightbox-nav-right {
+  right: 14px;
+}
+
 .lightbox-image,
 .lightbox-missing {
   width: 100%;
   max-height: calc(100vh - 190px);
-  margin-top: 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
   object-fit: contain;
@@ -1383,5 +1419,18 @@ select {
 
   .detail-shell {
     padding: 22px;
+  }
+
+  .lightbox-nav {
+    width: 40px;
+    height: 40px;
+  }
+
+  .lightbox-nav-left {
+    left: 10px;
+  }
+
+  .lightbox-nav-right {
+    right: 10px;
   }
 }
