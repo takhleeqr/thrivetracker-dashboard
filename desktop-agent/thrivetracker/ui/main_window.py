@@ -8,6 +8,7 @@ from tkinter import ttk
 from ..activity_tracker import ActivitySnapshot, ActivityTracker
 from ..api_service import ApiError, Project, SupabaseApiService, TimeEntry
 from ..app_paths import AppPaths
+from ..device_identity import DeviceIdentity
 from ..auth_service import AuthenticatedUser
 from ..config import AppConfig, save_local_config
 from ..offline_queue import OfflineQueue, QueueItem
@@ -22,6 +23,7 @@ class MainWindow(ttk.Frame):
         config: AppConfig,
         user: AuthenticatedUser,
         paths: AppPaths,
+        device: DeviceIdentity,
         temp_dir,
         queue_dir,
         on_minimize: Callable[[], None],
@@ -31,6 +33,7 @@ class MainWindow(ttk.Frame):
         self.config = config
         self.user = user
         self.paths = paths
+        self.device = device
         self.on_minimize = on_minimize
         self.api = SupabaseApiService(
             config.supabase_url,
@@ -113,6 +116,7 @@ class MainWindow(ttk.Frame):
 
     def _load_initial_data_worker(self) -> None:
         try:
+            self.api.register_device(self.device)
             projects = self.api.get_assigned_projects()
             total_seconds = self.api.get_today_total_seconds()
             self.root.after(0, lambda: self._finish_initial_data(projects, total_seconds))
@@ -160,7 +164,7 @@ class MainWindow(ttk.Frame):
 
     def _start_timer_worker(self, project: Project) -> None:
         try:
-            entry = self.api.start_time_entry(project.id)
+            entry = self.api.start_time_entry(project.id, self.device)
             self.root.after(0, lambda: self._finish_start(entry))
         except Exception as error:
             message = str(error) if isinstance(error, ApiError) else "Could not start the timer."
@@ -168,6 +172,7 @@ class MainWindow(ttk.Frame):
 
     def _finish_start(self, entry: TimeEntry) -> None:
         self.active_entry = entry
+        active_project = next((project for project in self.projects if project.id == entry.project_id), None)
         self.idle_resume_project_id = None
         self.break_resume_project_id = None
         self.break_started_at = None
@@ -179,6 +184,8 @@ class MainWindow(ttk.Frame):
         self.button_text.set("Stop")
         self.break_button_text.set("Take Break")
         self.break_button.configure(state="normal")
+        if active_project:
+            self.project_var.set(active_project.name)
         self.project_combo.configure(state="disabled")
         self._set_busy(False)
         self._start_activity_tracking()
@@ -607,7 +614,7 @@ class MainWindow(ttk.Frame):
 
     def _heartbeat_worker(self) -> None:
         try:
-            self.api.record_heartbeat()
+            self.api.record_heartbeat(self.device.install_id)
         except Exception:
             pass
         finally:

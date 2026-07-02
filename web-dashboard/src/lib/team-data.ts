@@ -14,6 +14,13 @@ export type ManagedVa = {
   assignedProjectIds: string[];
   assignedProjects: string[];
   workingDays: string[];
+  lastDevice: {
+    hostname: string;
+    os_username: string | null;
+    first_seen_at: string;
+    last_login_at: string;
+    last_seen_at: string | null;
+  } | null;
 };
 
 export type VaFormInput = {
@@ -60,9 +67,19 @@ type ProjectRow = {
   name: string;
 };
 
+type UserDeviceRow = {
+  id: string;
+  user_id: string;
+  hostname: string;
+  os_username: string | null;
+  first_seen_at: string;
+  last_login_at: string;
+  last_seen_at: string | null;
+};
+
 export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ projects: TeamProjectOption[]; team: ManagedVa[] }> {
   const weekStart = startOfWeekIso();
-  const [profilesResult, entriesResult, projectsResult, assignmentsResult] = await Promise.all([
+  const [profilesResult, entriesResult, projectsResult, assignmentsResult, devicesResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id,full_name,email,is_active,created_at,last_seen_at,hourly_rate,expected_hours_per_week,working_days")
@@ -71,18 +88,29 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
     supabase.from("time_entries").select("user_id,duration_seconds").gte("started_at", weekStart),
     supabase.from("projects").select("id,name"),
     supabase.from("project_assignments").select("user_id,project_id"),
+    supabase.from("user_devices").select("id,user_id,hostname,os_username,first_seen_at,last_login_at,last_seen_at"),
   ]);
 
   if (profilesResult.error) throw profilesResult.error;
   if (entriesResult.error) throw entriesResult.error;
   if (projectsResult.error) throw projectsResult.error;
   if (assignmentsResult.error) throw assignmentsResult.error;
+  if (devicesResult.error) throw devicesResult.error;
 
   const profiles = (profilesResult.data ?? []) as ProfileRow[];
   const entries = (entriesResult.data ?? []) as TimeEntryRow[];
   const assignments = (assignmentsResult.data ?? []) as AssignmentRow[];
   const projects = (projectsResult.data ?? []) as ProjectRow[];
+  const devices = (devicesResult.data ?? []) as UserDeviceRow[];
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+  const latestDeviceByUser = new Map<string, UserDeviceRow>();
+
+  for (const device of devices) {
+    const current = latestDeviceByUser.get(device.user_id);
+    if (!current || latestDeviceTimestamp(device) > latestDeviceTimestamp(current)) {
+      latestDeviceByUser.set(device.user_id, device);
+    }
+  }
 
   return {
     team: profiles.map((profile) => {
@@ -102,10 +130,18 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
         assignedProjectIds: userAssignments.map((assignment) => assignment.project_id),
         assignedProjects: userAssignments.map((assignment) => projectNames.get(assignment.project_id) ?? "Unknown"),
         workingDays: profile.working_days ?? [],
+        lastDevice: latestDeviceByUser.get(profile.id) ?? null,
       };
     }),
     projects: projects.map((project) => ({ id: project.id, name: project.name })),
   };
+}
+
+function latestDeviceTimestamp(device: UserDeviceRow) {
+  return Math.max(
+    new Date(device.last_seen_at ?? device.first_seen_at).getTime(),
+    new Date(device.last_login_at ?? device.first_seen_at).getTime(),
+  );
 }
 
 export async function saveVa(input: VaFormInput): Promise<void> {

@@ -212,6 +212,7 @@ export default function TeamPage() {
                 <span>Rate</span>
                 <span>Weekly Hours</span>
                 <span>Expected</span>
+                <span>Latest Device</span>
                 <span>Last Seen</span>
                 <span>Status</span>
                 <span>Actions</span>
@@ -229,6 +230,16 @@ export default function TeamPage() {
                     <span>${va.hourlyRate.toFixed(2)}/hr</span>
                     <span>{formatHours(va.totalHoursSeconds)}</span>
                     <span>{va.expectedHoursPerWeek ? `${va.expectedHoursPerWeek}h` : "-"}</span>
+                    <span>
+                      {va.lastDevice ? (
+                        <>
+                          <strong>{va.lastDevice.hostname}</strong>
+                          <small>{va.lastDevice.os_username ? `Windows user: ${va.lastDevice.os_username}` : "Windows user unavailable"}</small>
+                        </>
+                      ) : (
+                        "No device yet"
+                      )}
+                    </span>
                     <span>{formatDateTimeFull(va.lastSeenAt, timezone)}</span>
                     <span>
                       <span className={`status-pill ${va.is_active ? "status-online" : "status-offline"}`}>

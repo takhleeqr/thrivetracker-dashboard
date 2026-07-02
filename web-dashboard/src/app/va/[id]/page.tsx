@@ -253,6 +253,36 @@ export default function VaDetailPage() {
             </Card>
 
             <Card className="detail-card">
+              <SectionTitle eyebrow="Access" title="Latest Login Device" />
+              <div className="app-usage-list">
+                {detail.lastDevice ? (
+                  <>
+                    <div className="app-usage-row">
+                      <span>
+                        <strong>{detail.lastDevice.hostname}</strong>
+                        <small>{detail.lastDevice.os_username ? `Windows user: ${detail.lastDevice.os_username}` : "Windows user unavailable"}</small>
+                      </span>
+                      <b>PC</b>
+                    </div>
+                    <div className="app-usage-row">
+                      <span>
+                        <strong>Last login</strong>
+                        <small>{formatDateTimeFull(detail.lastDevice.last_login_at, timezone)}</small>
+                      </span>
+                      <b>Seen</b>
+                    </div>
+                    <div className="app-usage-row">
+                      <span>
+                        <strong>Last heartbeat</strong>
+                        <small>{detail.lastDevice.last_seen_at ? formatDateTimeFull(detail.lastDevice.last_seen_at, timezone) : "No heartbeat yet"}</small>
+                      </span>
+                      <b>Live</b>
+                    </div>
+                  </>
+                ) : (
+                  <EmptySmall icon={Monitor} title="No device recorded yet" text="The desktop app will register the computer after the VA logs in." />
+                )}
+              </div>
               <SectionTitle eyebrow="Apps" title="Active Apps" />
               <div className="app-usage-list">
                 {detail.appUsage.length ? (
@@ -363,7 +393,10 @@ export default function VaDetailPage() {
                 {detail.timeEntries.length ? (
                   detail.timeEntries.map((entry) => (
                     <div className="table-row data-row detail-table-row" key={entry.id}>
-                      <span>{entry.projectName}</span>
+                      <span>
+                        <strong>{entry.projectName}</strong>
+                        <small>{entry.device_hostname ? deviceLabel(entry.device_hostname, entry.device_os_username) : "Device not captured"}</small>
+                      </span>
                       <span>{formatInTimezone(entry.started_at, timezone)}</span>
                       <span>{entry.stopped_at ? formatInTimezone(entry.stopped_at, timezone) : "Running"}</span>
                       <span>{formatHours(entry.duration_seconds ?? runningDuration(entry.started_at, detail.lastSeenAt, detail.rangeEnd))}</span>
@@ -837,4 +870,8 @@ function rangeLabel(range: DetailDateRange, timezone: string) {
 
 function formatMoney(value: number) {
   return `$${value.toFixed(2)}`;
+}
+
+function deviceLabel(hostname: string, osUsername: string | null | undefined) {
+  return osUsername ? `${hostname} (${osUsername})` : hostname;
 }

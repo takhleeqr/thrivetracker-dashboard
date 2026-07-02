@@ -5,6 +5,7 @@ import logging
 from . import __app_name__, __version__
 from .app_paths import ensure_app_dirs, get_app_paths
 from .config import get_config
+from .device_identity import get_device_identity
 from .logging_setup import configure_logging
 from .auth_service import AuthenticatedUser
 from .tray import TrayController
@@ -22,6 +23,7 @@ class DesktopApp:
         ensure_app_dirs(self.paths)
         configure_logging(self.paths.logs_dir)
         self.config = get_config(self.paths)
+        self.device = get_device_identity(self.paths)
         self.main_window: MainWindow | None = None
         self.tray: TrayController | None = None
         self._configure_root()
@@ -63,6 +65,7 @@ class DesktopApp:
             self.config,
             user,
             self.paths,
+            self.device,
             self.paths.temp_dir,
             self.paths.queue_dir,
             self.hide_to_tray,

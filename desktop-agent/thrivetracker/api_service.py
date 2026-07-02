@@ -12,6 +12,7 @@ import httpx
 
 from .auth_service import AuthenticatedUser, AuthError, SupabaseAuthService
 from .activity_tracker import ActivitySnapshot
+from .device_identity import DeviceIdentity
 from .screenshot_service import CapturedScreenshot
 
 
@@ -83,24 +84,40 @@ class SupabaseApiService:
 
         return sorted(projects, key=lambda project: project.name.lower())
 
-    def start_time_entry(self, project_id: str) -> TimeEntry:
+    def register_device(self, device: DeviceIdentity) -> None:
+        self._request(
+            "POST",
+            "/rest/v1/rpc/register_user_device",
+            json={
+                "p_install_id": device.install_id,
+                "p_device_fingerprint": device.fingerprint_hash,
+                "p_hostname": device.hostname,
+                "p_os_username": device.os_username,
+            },
+            prefer="return=minimal",
+        )
+
+    def start_time_entry(self, project_id: str, device: DeviceIdentity) -> TimeEntry:
         data = self._request(
             "POST",
-            "/rest/v1/time_entries",
+            "/rest/v1/rpc/start_tracking_session",
             json={
-                "user_id": self.user.user_id,
-                "project_id": project_id,
-                "is_manual": False,
+                "p_project_id": project_id,
+                "p_install_id": device.install_id,
+                "p_device_fingerprint": device.fingerprint_hash,
+                "p_hostname": device.hostname,
+                "p_os_username": device.os_username,
             },
-            prefer="return=representation",
         )
         if not data:
             raise ApiError("Supabase did not return the new time entry.")
 
+        row = data[0] if isinstance(data, list) else data
+
         return TimeEntry(
-            id=data[0]["id"],
-            project_id=project_id,
-            started_at=_parse_supabase_datetime(data[0]["started_at"]),
+            id=row["id"],
+            project_id=row["project_id"],
+            started_at=_parse_supabase_datetime(row["started_at"]),
         )
 
     def stop_time_entry(self, entry: TimeEntry, reason: str = "manual") -> int:
@@ -223,11 +240,11 @@ class SupabaseApiService:
         data = self._request("GET", "/rest/v1/settings?select=key,value")
         return {item["key"]: item["value"] for item in data}
 
-    def record_heartbeat(self) -> None:
+    def record_heartbeat(self, install_id: str) -> None:
         self._request(
             "POST",
             "/rest/v1/rpc/record_heartbeat",
-            json={},
+            json={"p_install_id": install_id},
             prefer="return=minimal",
         )
 
@@ -266,7 +283,7 @@ class SupabaseApiService:
             )
 
         if response.status_code >= 400:
-            raise ApiError(f"Supabase request failed: {response.status_code} {response.text}")
+            raise ApiError(_supabase_error_message(response))
 
         if not response.content:
             return None
@@ -356,3 +373,17 @@ def _parse_supabase_datetime(value: str) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _supabase_error_message(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return f"Supabase request failed: {response.status_code} {response.text}"
+
+    if isinstance(payload, dict):
+        message = payload.get("message") or payload.get("error_description") or payload.get("error")
+        if message:
+            return str(message)
+
+    return f"Supabase request failed: {response.status_code} {response.text}"

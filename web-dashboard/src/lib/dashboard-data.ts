@@ -30,6 +30,20 @@ export type TimeEntry = {
   is_manual?: boolean;
   manual_note?: string | null;
   stop_reason: "manual" | "idle" | "app_close" | "crash" | "break" | null;
+  device_id?: string | null;
+  device_hostname?: string | null;
+  device_os_username?: string | null;
+  device_fingerprint?: string | null;
+};
+
+export type UserDevice = {
+  id: string;
+  user_id: string;
+  hostname: string;
+  os_username: string | null;
+  first_seen_at: string;
+  last_login_at: string;
+  last_seen_at: string | null;
 };
 
 export type ActivityLog = {
@@ -88,6 +102,7 @@ export type TimeEntryWithMetrics = TimeEntry & {
 
 export type VaDetail = {
   profile: Profile;
+  lastDevice: UserDevice | null;
   totalHoursTodaySeconds: number;
   totalHoursWeekSeconds: number;
   totalHoursMonthSeconds: number;
@@ -221,7 +236,7 @@ export async function loadDashboardSummary(
     supabase.from("projects").select("id,name"),
     supabase
       .from("time_entries")
-      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason")
+      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason,device_id,device_hostname,device_os_username,device_fingerprint")
       .lte("started_at", queryEnd)
       .or(`stopped_at.is.null,stopped_at.gte.${queryStart}`),
     supabase
@@ -364,7 +379,7 @@ export async function closeStaleTimeEntries(supabase: SupabaseClient): Promise<n
 export async function loadVaDetail(supabase: SupabaseClient, userId: string, range?: DetailDateRange, timezone = "Asia/Karachi"): Promise<VaDetail> {
   const selectedRange = range ?? { start: startOfTodayIso(timezone), end: new Date().toISOString() };
 
-  const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult] = await Promise.all([
+  const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult, userDevicesResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate")
@@ -375,7 +390,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
     supabase.from("project_assignments").select("project_id").eq("user_id", userId),
     supabase
       .from("time_entries")
-      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason")
+      .select("id,user_id,project_id,started_at,stopped_at,duration_seconds,is_manual,manual_note,stop_reason,device_id,device_hostname,device_os_username,device_fingerprint")
       .eq("user_id", userId)
       .lte("started_at", selectedRange.end)
       .or(`stopped_at.is.null,stopped_at.gte.${selectedRange.start}`)
@@ -398,6 +413,10 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
       .lte("captured_at", selectedRange.end)
       .order("captured_at", { ascending: false })
       .limit(1000),
+    supabase
+      .from("user_devices")
+      .select("id,user_id,hostname,os_username,first_seen_at,last_login_at,last_seen_at")
+      .eq("user_id", userId),
   ]);
 
   if (profileResult.error) throw profileResult.error;
@@ -406,6 +425,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   if (entriesResult.error) throw entriesResult.error;
   if (activityResult.error) throw activityResult.error;
   if (screenshotsResult.error) throw screenshotsResult.error;
+  if (userDevicesResult.error) throw userDevicesResult.error;
   if (!profileResult.data) throw new Error("VA profile was not found.");
 
   const profile = profileResult.data as Profile;
@@ -414,11 +434,13 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   const entries = (entriesResult.data ?? []) as TimeEntry[];
   const activityLogs = (activityResult.data ?? []) as ActivityLog[];
   const screenshotRows = (screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[];
+  const userDevices = (userDevicesResult.data ?? []) as UserDevice[];
   const screenshots = await addSignedScreenshotUrls(supabase, screenshotRows.slice(0, 60));
   const screenshotsForMetrics = screenshotRows.map((screenshot) => ({ ...screenshot, signedUrl: null }));
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
   const activeEntry = entries.find((entry) => !entry.stopped_at) ?? null;
   const latestEntry = newestEntry(entries);
+  const lastDevice = newestDevice(userDevices);
   const status = getStatus(activeEntry, latestEntry, profile.last_seen_at, Date.now());
   const hourlyRate = Number(profile.hourly_rate ?? 0);
   const weekRange = currentWeekRange(timezone);
@@ -428,6 +450,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
 
   return {
     profile,
+    lastDevice,
     totalHoursTodaySeconds: totalSecondsInRange(entries, selectedRange, Date.now(), profile.last_seen_at, status),
     totalHoursWeekSeconds: weekSeconds,
     totalHoursMonthSeconds: monthSeconds,
@@ -501,8 +524,21 @@ function newestEntry(entries: TimeEntry[]): TimeEntry | null {
   return [...entries].sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())[0] ?? null;
 }
 
+function newestDevice(devices: UserDevice[]): UserDevice | null {
+  return (
+    [...devices].sort((first, second) => latestDeviceTimestamp(second) - latestDeviceTimestamp(first))[0] ?? null
+  );
+}
+
 function newestActivity(logs: ActivityLog[]): ActivityLog | null {
   return [...logs].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0] ?? null;
+}
+
+function latestDeviceTimestamp(device: UserDevice) {
+  return Math.max(
+    new Date(device.last_seen_at ?? device.first_seen_at).getTime(),
+    new Date(device.last_login_at ?? device.first_seen_at).getTime(),
+  );
 }
 
 function getDisplayStatus(
