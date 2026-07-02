@@ -201,7 +201,7 @@ begin
   select last_seen_at
   into profile_last_seen
   from public.profiles
-  where id = auth.uid();
+  where public.profiles.id = auth.uid();
 
   select
     time_entries.id,
