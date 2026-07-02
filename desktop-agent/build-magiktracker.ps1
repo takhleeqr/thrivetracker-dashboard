@@ -32,6 +32,7 @@ $magikConfig = @"
 NEXT_PUBLIC_SUPABASE_URL = "https://fdrazaffbgwvcxnrxwwc.supabase.co"
 NEXT_PUBLIC_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkcmF6YWZmYmd3dmN4bnJ4d3djIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIyNzEwNTIsImV4cCI6MjA5Nzg0NzA1Mn0.8MhOWJA2SBBnkx6IosuTSmzaHq3s_hzqbrM85SNIFYg"
 SUPABASE_STORAGE_BUCKET = "screenshots"
+APP_INTERNAL_NAME = "MagikTracker"
 APP_COMPANY_NAME = "Magik"
 APP_TIMEZONE = "Asia/Karachi"
 "@

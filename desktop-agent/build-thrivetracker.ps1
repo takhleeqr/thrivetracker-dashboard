@@ -40,6 +40,7 @@ $thriveConfig = @"
 NEXT_PUBLIC_SUPABASE_URL = "https://gblftoqzztpzfxzbixdy.supabase.co"
 NEXT_PUBLIC_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdibGZ0b3F6enRwemZ4emJpeGR5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE2MjE2NjYsImV4cCI6MjA5NzE5NzY2Nn0.3P50L__0fXwsPn8DG03SY6iQgDv-fho4NY7guc6JU-I"
 SUPABASE_STORAGE_BUCKET = "screenshots"
+APP_INTERNAL_NAME = "ThriveTracker"
 APP_COMPANY_NAME = "ThriveTracker"
 APP_TIMEZONE = "UTC"
 "@

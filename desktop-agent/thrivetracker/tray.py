@@ -4,6 +4,8 @@ import threading
 from PIL import Image, ImageDraw
 import pystray
 
+from . import __app_name__
+
 
 class TrayController:
     def __init__(
@@ -16,9 +18,9 @@ class TrayController:
         self.on_show_window = on_show_window
         self.on_quit = on_quit
         self.icon = pystray.Icon(
-            "ThriveTracker",
+            __app_name__,
             self._create_icon_image(),
-            "ThriveTracker",
+            __app_name__,
             pystray.Menu(
                 pystray.MenuItem("Start/Stop", self._toggle_tracking),
                 pystray.MenuItem("Show Window", self._show_window),
