@@ -801,9 +801,10 @@ select {
 .activity-log-head,
 .activity-log-row {
   display: grid;
-  grid-template-columns: 150px 150px 90px minmax(190px, 1.2fr) 84px 84px 84px 90px 70px;
+  grid-template-columns: 150px 110px 80px 180px 72px 72px 72px 78px 60px;
   gap: 12px;
-  min-width: 1140px;
+  width: max-content;
+  min-width: 918px;
   padding: 12px 14px;
 }
 
@@ -816,7 +817,7 @@ select {
 }
 
 .activity-log-head .metric-col {
-  text-align: right;
+  text-align: center;
 }
 
 .activity-log-row {
@@ -877,6 +878,10 @@ select {
 .metric-col {
   text-align: right;
   justify-self: end;
+}
+
+.activity-log-head > span {
+  white-space: nowrap;
 }
 
 .detail-metric-grid {

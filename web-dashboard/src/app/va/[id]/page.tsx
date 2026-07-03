@@ -561,7 +561,7 @@ function ActivityLogTable({
           <span>{displayDuration(item.durationSeconds)}</span>
           <span className="activity-log-reason" title={item.explanation}>
             <strong>{item.endedBy}</strong>
-            <small>{item.kind === "work" ? "Hover for explanation" : "Non-working period"}</small>
+            <small>{item.kind === "work" ? "Hover for explanation" : "Not applicable"}</small>
           </span>
           <span className="metric-col">{item.session?.averageActivityPercent === null || item.session === null ? "-" : formatPercent(item.session.averageActivityPercent)}</span>
           <span className="metric-col">{item.session?.totalKeystrokes ?? "-"}</span>
@@ -644,7 +644,7 @@ function SelectionDetailsCard({
 
       {nonWorkActivity ? (
         <div className="selection-note">
-          <strong>{nonWorkActivity.endedBy}</strong>
+          <strong>{nonWorkActivity.title}</strong>
           <p>{nonWorkActivity.explanation}</p>
         </div>
       ) : null}
@@ -1080,7 +1080,7 @@ function buildGapItem(
       id: `gap-${index}-break`,
       kind: "break",
       title: "Break",
-      endedBy: "Break started",
+      endedBy: "-",
       explanation: "The VA paused tracked work and stayed on break until the next work session began.",
       startedAt,
       endedAt,
@@ -1095,7 +1095,7 @@ function buildGapItem(
       id: `gap-${index}-idle`,
       kind: "idle",
       title: "Idle",
-      endedBy: "Inactivity",
+      endedBy: "-",
       explanation: "Tracking had already stopped because there was no keyboard or mouse activity for the idle limit.",
       startedAt,
       endedAt,
@@ -1110,7 +1110,7 @@ function buildGapItem(
       id: `gap-${index}-offline`,
       kind: "offline",
       title: "Offline",
-      endedBy: previousEntry.stop_reason === "crash" ? "Connection lost" : "App closed",
+      endedBy: "-",
       explanation: previousEntry.stop_reason === "crash"
         ? "The previous work session was closed automatically after the connection was lost."
         : "The previous work session ended because the desktop app was closed.",
@@ -1126,7 +1126,7 @@ function buildGapItem(
     id: `gap-${index}-not-tracking`,
     kind: "not_tracking",
     title: "Not Tracking",
-    endedBy: "User stopped",
+    endedBy: "-",
     explanation: "The VA had stopped tracking, and no new work session had started yet.",
     startedAt,
     endedAt,
