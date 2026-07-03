@@ -33,7 +33,7 @@ const emptySummary: DashboardSummary = {
   rows: [],
 };
 
-type OverviewRangeMode = "today" | "yesterday" | "week" | "month" | "custom";
+type OverviewRangeMode = "today" | "last24h" | "yesterday" | "week" | "month" | "custom";
 type OverviewScreenshot = {
   capturedAt: string;
   signedUrl: string;
@@ -44,7 +44,7 @@ export default function DashboardHome() {
   const router = useRouter();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
-  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "online" | "idle" | "on_break" | "offline" | "low" | "attention">("active");
+  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "working" | "idle" | "on_break" | "stopped" | "offline" | "low" | "attention">("active");
   const [projectFilter, setProjectFilter] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -56,6 +56,7 @@ export default function DashboardHome() {
   const [customStartDate, setCustomStartDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [customEndDate, setCustomEndDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [selectedScreenshot, setSelectedScreenshot] = useState<OverviewScreenshot | null>(null);
+  const [isBootstrapped, setIsBootstrapped] = useState(false);
   const selectedRange = useMemo(
     () => buildOverviewRange(rangeMode, customStartDate, customEndDate, timezone),
     [customEndDate, customStartDate, rangeMode, timezone],
@@ -85,11 +86,7 @@ export default function DashboardHome() {
       setCustomStartDate(todayDateInputValue(settings.timezone));
       setCustomEndDate(todayDateInputValue(settings.timezone));
       setDashboardSettings(settings);
-      await refreshData(
-        settings.timezone,
-        settings,
-        buildOverviewRange(rangeMode, todayDateInputValue(settings.timezone), todayDateInputValue(settings.timezone), settings.timezone),
-      );
+      setIsBootstrapped(true);
     }
 
     boot();
@@ -99,10 +96,15 @@ export default function DashboardHome() {
   }, [router]);
 
   useEffect(() => {
-    if (!admin) return;
+    if (!admin || !isBootstrapped) return;
+    refreshData(timezone, dashboardSettings, selectedRange);
+  }, [admin, dashboardSettings, isBootstrapped, selectedRange, timezone]);
+
+  useEffect(() => {
+    if (!admin || !isBootstrapped) return;
     const intervalId = window.setInterval(() => refreshData(timezone, dashboardSettings, selectedRange), 60_000);
     return () => window.clearInterval(intervalId);
-  }, [admin, dashboardSettings, selectedRange, timezone]);
+  }, [admin, dashboardSettings, isBootstrapped, selectedRange, timezone]);
 
   async function refreshData(selectedTimezone = timezone, selectedSettings = dashboardSettings, range = selectedRange) {
     try {
@@ -126,10 +128,11 @@ export default function DashboardHome() {
   const visibleRows = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     return summary.rows.filter((row) => {
-      if (statusFilter === "active" && (row.status === "offline" || row.status === "day_off")) return false;
-      if (statusFilter === "online" && row.status !== "online") return false;
+      if (statusFilter === "active" && !["working", "on_break", "idle"].includes(row.status)) return false;
+      if (statusFilter === "working" && row.status !== "working") return false;
       if (statusFilter === "idle" && row.status !== "idle") return false;
       if (statusFilter === "on_break" && row.status !== "on_break") return false;
+      if (statusFilter === "stopped" && row.status !== "stopped") return false;
       if (statusFilter === "offline" && row.status !== "offline") return false;
       if (statusFilter === "low" && !row.alerts.some((alert) => alert.type === "low_activity")) return false;
       if (statusFilter === "attention" && !row.alerts.length && row.scheduleStatus !== "late" && row.scheduleStatus !== "no_show") return false;
@@ -156,6 +159,8 @@ export default function DashboardHome() {
     { label: "Productivity Score", value: String(Math.round(summary.averageActivityPercent)), icon: MonitorCheck, tone: "score" },
     { label: "Alerts", value: String(summary.alertCount), icon: AlertTriangle, tone: "alerts" },
   ];
+  const hoursColumnLabel = rangeMode === "today" ? "Hours Today" : "Tracked Hours";
+  const earningsColumnLabel = rangeMode === "today" ? "Earnings" : "Payable";
 
   return (
     <main className="dashboard-shell">
@@ -186,6 +191,7 @@ export default function DashboardHome() {
           <div className="topbar-actions">
             <Select aria-label="Date range" onChange={(event) => setRangeMode(event.target.value as OverviewRangeMode)} value={rangeMode}>
               <option value="today">Today</option>
+              <option value="last24h">Last 24 Hours</option>
               <option value="yesterday">Yesterday</option>
               <option value="week">This Week</option>
               <option value="month">This Month</option>
@@ -263,9 +269,10 @@ export default function DashboardHome() {
               </Select>
               <Select onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} value={statusFilter}>
                 <option value="active">Active only</option>
-                <option value="online">Working</option>
-                <option value="idle">Paused</option>
+                <option value="working">Working</option>
+                <option value="idle">Idle</option>
                 <option value="on_break">On Break</option>
+                <option value="stopped">Stopped</option>
                 <option value="offline">Offline</option>
                 <option value="attention">Needs Attention</option>
                 <option value="low">Low activity</option>
@@ -278,8 +285,8 @@ export default function DashboardHome() {
                 <span>Status</span>
                 <span>Project</span>
                 <span>Schedule</span>
-                <span>Hours Today</span>
-                <span>Earnings</span>
+                <span>{hoursColumnLabel}</span>
+                <span>{earningsColumnLabel}</span>
                 <span>Week</span>
                 <span>Activity</span>
                 <span>Alerts</span>
@@ -312,6 +319,7 @@ function VaRow({ onScreenshotClick, row }: { onScreenshotClick: (item: OverviewS
       </span>
       <span>
         <span className={`status-pill status-${row.status}`}>{statusLabel(row.status)}</span>
+        <small>{row.statusDetail}</small>
       </span>
       <span>{row.currentProject}</span>
       <span>
@@ -433,9 +441,10 @@ function scheduleLabel(status: DashboardRow["scheduleStatus"]) {
 }
 
 function statusLabel(status: DashboardRow["status"]) {
-  if (status === "online") return "Working";
-  if (status === "idle") return "Paused";
+  if (status === "working") return "Working";
+  if (status === "idle") return "Idle";
   if (status === "on_break") return "On Break";
+  if (status === "stopped") return "Stopped";
   if (status === "day_off") return "Day Off";
   return "Offline";
 }
@@ -445,6 +454,13 @@ function formatMoney(value: number) {
 }
 
 function buildOverviewRange(mode: OverviewRangeMode, customStartDate: string, customEndDate: string, timezone: string) {
+  if (mode === "last24h") {
+    return {
+      start: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      end: new Date().toISOString(),
+    };
+  }
+
   const todayInput = todayDateInputValue(timezone);
   let startInput = todayInput;
   let endInput = todayInput;

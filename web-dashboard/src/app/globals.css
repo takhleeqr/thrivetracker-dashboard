@@ -519,7 +519,8 @@ select {
   text-transform: capitalize;
 }
 
-.status-online {
+.status-online,
+.status-working {
   background: #e8f8ef;
   color: var(--green);
 }
@@ -532,6 +533,11 @@ select {
 .status-on_break {
   background: #fef3c7;
   color: #b45309;
+}
+
+.status-stopped {
+  background: #f3f0eb;
+  color: #7c4a15;
 }
 
 .status-offline {
@@ -735,6 +741,171 @@ select {
   color: var(--muted);
 }
 
+.activity-strip {
+  margin-top: 18px;
+}
+
+.activity-strip-track {
+  position: relative;
+  height: 44px;
+  margin: 10px 0 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, transparent 24.8%, var(--line) 25%, transparent 25.2%),
+    linear-gradient(90deg, transparent 49.8%, var(--line) 50%, transparent 50.2%),
+    linear-gradient(90deg, transparent 74.8%, var(--line) 75%, transparent 75.2%),
+    var(--surface-soft);
+}
+
+.activity-strip-block {
+  position: absolute;
+  top: 8px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.activity-strip-block.tone-work {
+  background: #2563eb;
+  box-shadow: 0 6px 14px rgba(37, 99, 235, 0.24);
+}
+
+.activity-strip-block.tone-break {
+  background: #facc15;
+  box-shadow: 0 6px 14px rgba(250, 204, 21, 0.22);
+}
+
+.activity-strip-block.tone-alert {
+  background: #ef4444;
+  box-shadow: 0 6px 14px rgba(239, 68, 68, 0.18);
+}
+
+.activity-strip-block.tone-neutral {
+  background: #cbd5e1;
+  box-shadow: 0 6px 14px rgba(148, 163, 184, 0.16);
+}
+
+.activity-strip-block.is-selected {
+  outline: 3px solid rgba(23, 23, 23, 0.18);
+}
+
+.activity-log-table {
+  margin-top: 10px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+
+.activity-log-head,
+.activity-log-row {
+  display: grid;
+  grid-template-columns: 150px 120px 90px 1.2fr 100px 80px 80px 70px 70px;
+  gap: 12px;
+  min-width: 1080px;
+  padding: 12px 14px;
+}
+
+.activity-log-head {
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.activity-log-row {
+  align-items: center;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+
+.activity-log-row:hover {
+  background: #f8fbff;
+}
+
+.activity-log-row.is-selected {
+  background: #eef4ff;
+}
+
+.activity-log-row.tone-work {
+  box-shadow: inset 4px 0 0 #16a34a;
+}
+
+.activity-log-row.tone-break {
+  box-shadow: inset 4px 0 0 #eab308;
+}
+
+.activity-log-row.tone-alert {
+  box-shadow: inset 4px 0 0 #ef4444;
+}
+
+.activity-log-row.tone-neutral {
+  box-shadow: inset 4px 0 0 #94a3b8;
+}
+
+.activity-log-row strong,
+.activity-log-row small {
+  display: block;
+}
+
+.activity-log-row small {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.detail-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.detail-metric-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.detail-metric-card small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.detail-metric-card strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 22px;
+}
+
+.selection-note {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px 14px;
+}
+
+.selection-note strong {
+  display: block;
+}
+
+.selection-note p {
+  margin: 6px 0 0;
+  color: var(--muted);
+}
+
 .activity-chart {
   display: flex;
   align-items: flex-end;
@@ -806,6 +977,22 @@ select {
   grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
   gap: 12px;
   margin-top: 18px;
+}
+
+.screenshot-session-groups {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.screenshot-session-group {
+  border-top: 1px solid var(--line);
+  padding-top: 18px;
+}
+
+.screenshot-session-group:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .screenshot-card {
@@ -891,6 +1078,11 @@ select {
 
 .payroll-table-row {
   grid-template-columns: 1fr 0.8fr 0.8fr;
+}
+
+.payroll-total-row {
+  background: var(--surface-soft);
+  font-weight: 800;
 }
 
 .project-table-row {
@@ -1413,7 +1605,8 @@ select {
   .detail-table-row,
   .project-table-row,
   .reports-table-row,
-  .editor-grid {
+  .editor-grid,
+  .detail-metric-grid {
     grid-template-columns: 1fr;
   }
 

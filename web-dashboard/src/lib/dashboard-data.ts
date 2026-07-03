@@ -132,7 +132,8 @@ export type DashboardRow = {
   userId: string;
   name: string;
   email: string;
-  status: "online" | "idle" | "offline" | "day_off" | "on_break";
+  status: "working" | "on_break" | "idle" | "stopped" | "offline" | "day_off";
+  statusDetail: string;
   scheduleStatus: "on_time" | "late" | "no_show" | "day_off" | "not_set";
   currentProject: string;
   currentProjectId: string | null;
@@ -183,8 +184,8 @@ export type DashboardSummary = {
 
 const LOW_ACTIVITY_THRESHOLD = 30;
 const RECENT_ACTIVITY_MINUTES = 10;
-const RECENT_IDLE_MINUTES = 30;
 const ONLINE_HEARTBEAT_MINUTES = 5;
+const RECENT_NON_WORKING_MINUTES = 60;
 const STALE_ENTRY_MINUTES = 10;
 const SCREENSHOT_BUCKET = process.env.NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET ?? "screenshots";
 
@@ -317,13 +318,14 @@ export async function loadDashboardSummary(
     });
     const rowAlerts = mergeAlerts(calculatedAlerts, persistedAlertsByUser.get(profile.id) ?? []);
 
-    const displayProjectEntry = activeEntry ?? (status === "on_break" ? latestEntry : null);
+    const displayProjectEntry = activeEntry ?? (status === "on_break" || status === "idle" || status === "stopped" ? latestEntry : null);
 
     return {
       userId: profile.id,
       name: profile.full_name,
       email: profile.email,
       status,
+      statusDetail: buildStatusDetail(status, latestEntry, profile.last_seen_at, now),
       scheduleStatus,
       currentProject: displayProjectEntry?.project_id ? projectNames.get(displayProjectEntry.project_id) ?? "Assigned Project" : "-",
       currentProjectId: displayProjectEntry?.project_id ?? null,
@@ -347,7 +349,7 @@ export async function loadDashboardSummary(
   const totalHoursTodaySeconds = rows.reduce((sum, row) => sum + row.hoursTodaySeconds, 0);
   const totalHoursWeekSeconds = rows.reduce((sum, row) => sum + row.weeklyHoursSeconds, 0);
   const totalEarningsToday = rows.reduce((sum, row) => sum + row.earningsToday, 0);
-  const onlineRows = rows.filter((row) => row.status === "online" || row.status === "on_break");
+  const onlineRows = rows.filter((row) => row.status === "working" || row.status === "on_break");
   const averageActivityPercent = averageActivity(
     rows
       .filter((row) => row.activityPercent !== null)
@@ -551,16 +553,10 @@ function getDisplayStatus(
   now: number,
 ): DashboardRow["status"] {
   const workingDays = profile.working_days ?? [];
-  if (workingDays.length && !workingDays.includes(weekdayKey(new Date(), timezone))) {
+  if (baseStatus !== "offline") return baseStatus;
+  if (workingDays.length && !workingDays.includes(weekdayKey(new Date(), timezone)) && !todayEntries.length) {
     return "day_off";
   }
-
-  if (activeEntry && baseStatus === "online") return "online";
-  if (latestEntry?.stop_reason === "break" && profile.last_seen_at) {
-    const lastSeenAgeMinutes = (now - new Date(profile.last_seen_at).getTime()) / 60000;
-    if (lastSeenAgeMinutes <= ONLINE_HEARTBEAT_MINUTES) return "on_break";
-  }
-  if (todayEntries.length) return "idle";
   return "offline";
 }
 
@@ -609,7 +605,7 @@ function totalSecondsToday(
       return sum + (entry.duration_seconds ?? 0);
     }
 
-    const endTime = status === "online" ? now : lastSeenAt ? new Date(lastSeenAt).getTime() : now;
+    const endTime = status === "working" ? now : lastSeenAt ? new Date(lastSeenAt).getTime() : now;
     return sum + Math.max(0, Math.floor((endTime - new Date(entry.started_at).getTime()) / 1000));
   }, 0);
 }
@@ -628,7 +624,7 @@ function totalSecondsInRange(
     const entryStart = new Date(entry.started_at).getTime();
     const entryEnd = entry.stopped_at
       ? new Date(entry.stopped_at).getTime()
-      : status === "online"
+      : status === "working"
         ? Math.min(now, rangeEnd)
         : lastSeenAt
           ? Math.min(new Date(lastSeenAt).getTime(), rangeEnd)
@@ -656,7 +652,7 @@ function buildDailyPay(
     const entryStart = new Date(entry.started_at).getTime();
     const entryEnd = entry.stopped_at
       ? new Date(entry.stopped_at).getTime()
-      : status === "online"
+      : status === "working"
         ? Math.min(now, rangeEnd)
         : lastSeenAt
           ? Math.min(new Date(lastSeenAt).getTime(), rangeEnd)
@@ -795,7 +791,7 @@ function buildDashboardAlerts({
   const alerts: DashboardAlert[] = [];
   const lastSeenAgeMinutes = profile.last_seen_at ? (now - new Date(profile.last_seen_at).getTime()) / 60000 : null;
 
-  if (status === "online" && activityPercent !== null && lowActivityStreakMinutes >= lowActivityMinimumMinutes) {
+  if (status === "working" && activityPercent !== null && lowActivityStreakMinutes >= lowActivityMinimumMinutes) {
     alerts.push({
       id: `${profile.id}-low-activity`,
       userId: profile.id,
@@ -897,7 +893,7 @@ function toTimelineSegment(
 ): TimelineSegment {
   const rangeStart = new Date(range.start).getTime();
   const rangeEnd = new Date(range.end).getTime();
-  const rawEndAt = entry.stopped_at ?? (status === "online" ? new Date().toISOString() : lastSeenAt);
+  const rawEndAt = entry.stopped_at ?? (status === "working" ? new Date().toISOString() : lastSeenAt);
   const rawEndTime = rawEndAt ? new Date(rawEndAt).getTime() : rangeEnd;
   const displayStartTime = Math.max(new Date(entry.started_at).getTime(), rangeStart);
   const displayEndTime = Math.min(rawEndTime, rangeEnd);
@@ -952,13 +948,88 @@ function getStatus(
 ): DashboardRow["status"] {
   if (activeEntry && lastSeenAt) {
     const lastSeenAgeMinutes = (now - new Date(lastSeenAt).getTime()) / 60000;
-    if (lastSeenAgeMinutes <= ONLINE_HEARTBEAT_MINUTES) return "online";
+    if (lastSeenAgeMinutes <= ONLINE_HEARTBEAT_MINUTES) return "working";
   }
 
-  if (latestEntry?.stop_reason === "idle" && latestEntry.stopped_at) {
-    const idleAgeMinutes = (now - new Date(latestEntry.stopped_at).getTime()) / 60000;
-    if (idleAgeMinutes <= RECENT_IDLE_MINUTES) return "idle";
+  if (!latestEntry) {
+    return "offline";
+  }
+
+  const stoppedAtMs = latestEntry.stopped_at ? new Date(latestEntry.stopped_at).getTime() : null;
+  const stoppedAgeMinutes = stoppedAtMs === null ? null : (now - stoppedAtMs) / 60000;
+
+  if (latestEntry.stop_reason === "break") {
+    const lastSeenAgeMinutes = lastSeenAt ? (now - new Date(lastSeenAt).getTime()) / 60000 : null;
+    if (lastSeenAgeMinutes !== null && lastSeenAgeMinutes <= ONLINE_HEARTBEAT_MINUTES) return "on_break";
+    return "stopped";
+  }
+
+  if (latestEntry.stop_reason === "idle") {
+    if (stoppedAgeMinutes !== null && stoppedAgeMinutes <= RECENT_NON_WORKING_MINUTES) return "idle";
+    return "stopped";
+  }
+
+  if (latestEntry.stop_reason === "manual") {
+    return "stopped";
+  }
+
+  if (latestEntry.stop_reason === "app_close" || latestEntry.stop_reason === "crash") {
+    return "offline";
   }
 
   return "offline";
+}
+
+function buildStatusDetail(
+  status: DashboardRow["status"],
+  latestEntry: TimeEntry | null,
+  lastSeenAt: string | null,
+  now: number,
+) {
+  if (status === "working") {
+    return lastSeenAt ? `Last activity ${relativeTimeFrom(lastSeenAt, now)}` : "Working now";
+  }
+
+  if (status === "on_break") {
+    return latestEntry?.stopped_at ? `Break started ${relativeTimeFrom(latestEntry.stopped_at, now)}` : "On break";
+  }
+
+  if (status === "idle") {
+    return latestEntry?.stopped_at ? `Idle since ${relativeTimeFrom(latestEntry.stopped_at, now)}` : "Idle";
+  }
+
+  if (status === "stopped") {
+    return latestEntry?.stopped_at ? `Stopped ${relativeTimeFrom(latestEntry.stopped_at, now)}` : "Not working";
+  }
+
+  if (status === "day_off") {
+    return "Scheduled day off";
+  }
+
+  if (latestEntry?.stop_reason === "app_close" && latestEntry.stopped_at) {
+    return `App closed ${relativeTimeFrom(latestEntry.stopped_at, now)}`;
+  }
+
+  if (latestEntry?.stop_reason === "crash" && latestEntry.stopped_at) {
+    return `Connection lost ${relativeTimeFrom(latestEntry.stopped_at, now)}`;
+  }
+
+  if (lastSeenAt) {
+    return `Last active ${relativeTimeFrom(lastSeenAt, now)}`;
+  }
+
+  return "No recent activity";
+}
+
+function relativeTimeFrom(value: string, now: number) {
+  const minutes = Math.max(0, Math.floor((now - new Date(value).getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) {
+    return remainingMinutes ? `${hours}h ${remainingMinutes}m ago` : `${hours}h ago`;
+  }
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day ago" : `${days} days ago`;
 }
