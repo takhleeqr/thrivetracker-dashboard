@@ -32,9 +32,10 @@ type ManualEntryForm = {
 
 type ActivityLogItem = {
   id: string;
-  kind: "session" | "break" | "idle" | "offline" | "stopped" | "untracked";
+  kind: "work" | "break" | "idle" | "offline" | "not_tracking";
   title: string;
-  reason: string;
+  endedBy: string;
+  explanation: string;
   startedAt: string;
   endedAt: string;
   durationSeconds: number;
@@ -48,6 +49,13 @@ type ScreenshotGroup = {
   shots: Screenshot[];
 };
 
+type ActivitySummaryBucket = {
+  kind: ActivityLogItem["kind"];
+  title: string;
+  tone: ActivityLogItem["tone"];
+  totalSeconds: number;
+};
+
 export default function VaDetailPage() {
   const router = useRouter();
   const params = useParams<{ id: string }>();
@@ -56,7 +64,7 @@ export default function VaDetailPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
-  const [rangeMode, setRangeMode] = useState<RangeMode>("today");
+  const [rangeMode, setRangeMode] = useState<RangeMode>("last24h");
   const [timezone, setTimezone] = useState("Asia/Karachi");
   const [customStart, setCustomStart] = useState(todayDateInputValue("Asia/Karachi"));
   const [customEnd, setCustomEnd] = useState(todayDateInputValue("Asia/Karachi"));
@@ -199,30 +207,33 @@ export default function VaDetailPage() {
     [activityItems, selectedActivityId],
   );
   const selectedSession = selectedActivity?.session ?? null;
+  const isNonWorkSelection = Boolean(selectedActivity && !selectedSession);
+  const wholeWindowPay = detail?.dailyPay.reduce((sum, day) => sum + day.earnings, 0) ?? 0;
   const scopedLogs = useMemo(
-    () => (selectedSession ? detail?.activityLogs.filter((log) => log.time_entry_id === selectedSession.id) ?? [] : detail?.activityLogs ?? []),
-    [detail?.activityLogs, selectedSession],
+    () => (selectedSession ? detail?.activityLogs.filter((log) => log.time_entry_id === selectedSession.id) ?? [] : isNonWorkSelection ? [] : detail?.activityLogs ?? []),
+    [detail?.activityLogs, isNonWorkSelection, selectedSession],
   );
   const scopedScreenshots = useMemo(
-    () => (selectedSession ? detail?.screenshots.filter((shot) => shot.time_entry_id === selectedSession.id) ?? [] : detail?.screenshots ?? []),
-    [detail?.screenshots, selectedSession],
+    () => (selectedSession ? detail?.screenshots.filter((shot) => shot.time_entry_id === selectedSession.id) ?? [] : isNonWorkSelection ? [] : detail?.screenshots ?? []),
+    [detail?.screenshots, isNonWorkSelection, selectedSession],
   );
   const scopedAppUsage = useMemo(
-    () => (selectedSession ? buildAppUsageFromLogs(scopedLogs) : detail?.appUsage ?? []),
-    [detail?.appUsage, scopedLogs, selectedSession],
+    () => (selectedSession ? buildAppUsageFromLogs(scopedLogs) : isNonWorkSelection ? [] : detail?.appUsage ?? []),
+    [detail?.appUsage, isNonWorkSelection, scopedLogs, selectedSession],
   );
   const screenshotGroups = useMemo(
-    () => (selectedSession ? [] : groupScreenshotsBySession(detail, timezone)),
-    [detail, selectedSession, timezone],
+    () => (selectedActivity ? [] : groupScreenshotsBySession(detail, timezone)),
+    [detail, selectedActivity, timezone],
   );
-  const scopedKeystrokes = scopedLogs.reduce((sum, log) => sum + Number(log.keystrokes_count ?? 0), 0);
-  const scopedClicks = scopedLogs.reduce((sum, log) => sum + Number(log.mouse_clicks_count ?? 0), 0);
-  const scopedAverageActivity = selectedSession ? selectedSession.averageActivityPercent : averageActivityFromLogs(scopedLogs);
-  const scopedScore = selectedSession ? selectedSession.productivityScore : productivityScore(scopedAverageActivity);
-  const scopedIdleMinutes = selectedSession ? selectedSession.idleMinutes : scopedLogs.filter((log) => Number(log.activity_percent ?? 0) === 0).length;
+  const scopedKeystrokes = isNonWorkSelection ? 0 : scopedLogs.reduce((sum, log) => sum + Number(log.keystrokes_count ?? 0), 0);
+  const scopedClicks = isNonWorkSelection ? 0 : scopedLogs.reduce((sum, log) => sum + Number(log.mouse_clicks_count ?? 0), 0);
+  const scopedAverageActivity = selectedSession ? selectedSession.averageActivityPercent : isNonWorkSelection ? null : averageActivityFromLogs(scopedLogs);
+  const scopedScore = selectedSession ? selectedSession.productivityScore : isNonWorkSelection ? null : productivityScore(scopedAverageActivity);
+  const scopedIdleMinutes = selectedSession ? selectedSession.idleMinutes : isNonWorkSelection ? null : scopedLogs.filter((log) => Number(log.activity_percent ?? 0) === 0).length;
   const scopedDurationSeconds = selectedActivity ? selectedActivity.durationSeconds : detail?.totalHoursTodaySeconds ?? 0;
-  const scopedPay = earningsForSeconds(scopedDurationSeconds, Number(detail?.profile.hourly_rate ?? 0));
+  const scopedPay = selectedSession ? earningsForSeconds(scopedDurationSeconds, Number(detail?.profile.hourly_rate ?? 0)) : isNonWorkSelection ? 0 : wholeWindowPay;
   const durationCardLabel = rangeMode === "today" ? "Hours Today" : rangeMode === "last24h" ? "Last 24 Hours" : "Tracked Hours";
+  const activitySummary = useMemo(() => buildActivitySummary(activityItems), [activityItems]);
 
   if (isLoading && !detail) {
     return (
@@ -266,11 +277,11 @@ export default function VaDetailPage() {
 
       <Card className="detail-card range-card">
         <Tabs>
-          <button className={rangeMode === "today" ? "selected" : ""} onClick={() => setRangeMode("today")} type="button">
-            Today
-          </button>
           <button className={rangeMode === "last24h" ? "selected" : ""} onClick={() => setRangeMode("last24h")} type="button">
             Last 24 Hours
+          </button>
+          <button className={rangeMode === "today" ? "selected" : ""} onClick={() => setRangeMode("today")} type="button">
+            Today
           </button>
           <button className={rangeMode === "week" ? "selected" : ""} onClick={() => setRangeMode("week")} type="button">
             Week
@@ -312,14 +323,7 @@ export default function VaDetailPage() {
           <section className="detail-grid">
             <Card className="detail-card detail-main-card">
               <SectionTitle eyebrow="Activity" title="Activity Log" />
-              <ActivityStrip
-                items={activityItems}
-                onSelect={setSelectedActivityId}
-                rangeEnd={detail.rangeEnd}
-                rangeStart={detail.rangeStart}
-                selectedId={selectedActivityId}
-                timezone={timezone}
-              />
+              <ActivitySummaryStrip summary={activitySummary} />
               <ActivityLogTable items={activityItems} onSelect={setSelectedActivityId} selectedId={selectedActivityId} timezone={timezone} />
             </Card>
 
@@ -335,7 +339,7 @@ export default function VaDetailPage() {
                 scopedKeystrokes={scopedKeystrokes}
                 scopedPay={scopedPay}
                 scopedScore={scopedScore}
-                scopedScreenshotsCount={selectedSession ? scopedScreenshots.length : detail.screenshotCount}
+                scopedScreenshotsCount={selectedSession ? scopedScreenshots.length : isNonWorkSelection ? 0 : detail.screenshotCount}
                 selectedActivity={selectedActivity}
                 selectedSession={selectedSession}
                 timezone={timezone}
@@ -346,8 +350,11 @@ export default function VaDetailPage() {
 
           <section className="detail-grid detail-grid-wide">
             <Card className="detail-card">
-              <SectionTitle eyebrow="Activity" title={selectedSession ? "Minute Activity for Selected Session" : "Minute Activity for Selected Time Window"} />
-              <ActivityChart logs={scopedLogs} timezone={timezone} />
+              <SectionTitle
+                eyebrow="Activity"
+                title={selectedSession ? "Minute Activity for Selected Work Session" : selectedActivity ? `Minute Activity for ${selectedActivity.title}` : "Minute Activity for Selected Time Window"}
+              />
+              <ActivityChart logs={scopedLogs} selectedActivity={selectedActivity} timezone={timezone} />
             </Card>
 
             <Card className="detail-card">
@@ -356,11 +363,13 @@ export default function VaDetailPage() {
           </section>
 
           <Card className="detail-card">
-            <SectionTitle eyebrow="Visual Audit" title={selectedSession ? "Session Screenshots" : "Screenshots for Selected Time Window"} />
+            <SectionTitle eyebrow="Visual Audit" title={selectedSession ? "Session Screenshots" : selectedActivity ? `Screenshots for ${selectedActivity.title}` : "Screenshots for Selected Time Window"} />
             <p className="subtle-line">
               {selectedSession
                 ? "Only screenshots from the selected session are shown here."
-                : "Screenshots are grouped by session so the whole time window is easier to review."}
+                : selectedActivity
+                  ? "Screenshots only exist while a work session is actively being tracked."
+                  : "Screenshots are grouped by session so the whole time window is easier to review."}
             </p>
             <ScreenshotsPanel
               groups={screenshotGroups}
@@ -497,47 +506,15 @@ function ManualEntryModal({
   );
 }
 
-function ActivityStrip({
-  items,
-  onSelect,
-  rangeEnd,
-  rangeStart,
-  selectedId,
-  timezone,
-}: {
-  items: ActivityLogItem[];
-  onSelect: (id: string) => void;
-  rangeEnd: string;
-  rangeStart: string;
-  selectedId: string | null;
-  timezone: string;
-}) {
-  if (!items.length) {
-    return <EmptySmall icon={Rows3} title="No activity yet" text="Tracked work and gaps will appear here." />;
-  }
-
+function ActivitySummaryStrip({ summary }: { summary: ActivitySummaryBucket[] }) {
   return (
-    <div className="activity-strip">
-      <div className="timeline-axis">
-        {timelineAxisLabels(rangeStart, rangeEnd, timezone).map((label) => (
-          <span key={label}>{label}</span>
-        ))}
-      </div>
-      <div className="activity-strip-track">
-        {items.map((item) => {
-          const position = timelinePosition(item.startedAt, item.endedAt, rangeStart, rangeEnd);
-          return (
-            <button
-              className={`activity-strip-block tone-${item.tone} ${selectedId === item.id ? "is-selected" : ""}`}
-              key={item.id}
-              onClick={() => onSelect(item.id)}
-              style={{ left: `${position.left}%`, width: `${position.width}%` }}
-              title={`${item.title}: ${formatHours(item.durationSeconds)}`}
-              type="button"
-            />
-          );
-        })}
-      </div>
+    <div className="activity-summary-strip">
+      {summary.map((bucket) => (
+        <div className={`activity-summary-card tone-${bucket.tone}`} key={bucket.kind}>
+          <small>{bucket.title}</small>
+          <strong>{displayDuration(bucket.totalSeconds)}</strong>
+        </div>
+      ))}
     </div>
   );
 }
@@ -559,12 +536,12 @@ function ActivityLogTable({
         <span>Time</span>
         <span>Type</span>
         <span>Duration</span>
-        <span>Reason</span>
-        <span>Activity</span>
-        <span>Keys</span>
-        <span>Clicks</span>
-        <span>Shots</span>
-        <span>Score</span>
+        <span>Ended By</span>
+        <span className="metric-col">Activity</span>
+        <span className="metric-col">Keys</span>
+        <span className="metric-col">Clicks</span>
+        <span className="metric-col">Screens</span>
+        <span className="metric-col">Score</span>
       </div>
       {items.map((item) => (
         <button
@@ -573,18 +550,24 @@ function ActivityLogTable({
           onClick={() => onSelect(item.id)}
           type="button"
         >
-          <span>
+          <span className="activity-log-time">
             <strong>{formatInTimezone(item.startedAt, timezone)}</strong>
             <small>{formatInTimezone(item.endedAt, timezone)}</small>
           </span>
-          <span>{item.title}</span>
-          <span>{formatHours(item.durationSeconds)}</span>
-          <span>{item.reason}</span>
-          <span>{item.session?.averageActivityPercent === null || item.session === null ? "-" : formatPercent(item.session.averageActivityPercent)}</span>
-          <span>{item.session?.totalKeystrokes ?? "-"}</span>
-          <span>{item.session?.totalMouseClicks ?? "-"}</span>
-          <span>{item.session?.screenshotsTaken ?? "-"}</span>
-          <span>{item.session?.productivityScore ?? "-"}</span>
+          <span className="activity-log-type">
+            <strong>{item.title}</strong>
+            {item.session?.is_manual ? <small className="manual-badge">Manual</small> : null}
+          </span>
+          <span>{displayDuration(item.durationSeconds)}</span>
+          <span className="activity-log-reason" title={item.explanation}>
+            <strong>{item.endedBy}</strong>
+            <small>{item.kind === "work" ? "Hover for explanation" : "Non-working period"}</small>
+          </span>
+          <span className="metric-col">{item.session?.averageActivityPercent === null || item.session === null ? "-" : formatPercent(item.session.averageActivityPercent)}</span>
+          <span className="metric-col">{item.session?.totalKeystrokes ?? "-"}</span>
+          <span className="metric-col">{item.session?.totalMouseClicks ?? "-"}</span>
+          <span className="metric-col">{item.session?.screenshotsTaken ?? "-"}</span>
+          <span className="metric-col">{item.session?.productivityScore ?? "-"}</span>
         </button>
       ))}
     </div>
@@ -614,21 +597,19 @@ function SelectionDetailsCard({
   scopedAverageActivity: number | null;
   scopedClicks: number;
   scopedDurationSeconds: number;
-  scopedIdleMinutes: number;
+  scopedIdleMinutes: number | null;
   scopedKeystrokes: number;
   scopedPay: number;
-  scopedScore: number;
+  scopedScore: number | null;
   scopedScreenshotsCount: number;
   selectedActivity: ActivityLogItem | null;
   selectedSession: VaDetail["timeEntries"][number] | null;
   timezone: string;
   unproductiveApps: string[];
 }) {
-  const title = selectedSession
-    ? "Selected Session"
-    : selectedActivity
-      ? selectedActivity.title
-      : "Selected Time Window";
+  const isNonWorkSelection = Boolean(selectedActivity && !selectedSession);
+  const nonWorkActivity = isNonWorkSelection ? selectedActivity : null;
+  const title = selectedSession ? "Selected Work Session" : selectedActivity ? `Selected ${selectedActivity.title}` : "Selected Time Window";
   const subtitle = selectedSession
     ? `${formatDateTimeFull(selectedActivity?.startedAt ?? selectedSession.started_at, timezone)} to ${formatDateTimeFull(selectedActivity?.endedAt ?? selectedSession.stopped_at ?? selectedSession.started_at, timezone)}`
     : selectedActivity
@@ -651,44 +632,54 @@ function SelectionDetailsCard({
       </div>
 
       <div className="detail-metric-grid">
-        <MetricCard label="Duration" value={formatHours(scopedDurationSeconds)} />
-        <MetricCard label="Payable" value={formatMoney(scopedPay)} />
-        <MetricCard label="Avg Activity" value={scopedAverageActivity === null ? "-" : formatPercent(scopedAverageActivity)} />
-        <MetricCard label="Score" value={String(scopedScore)} />
-        <MetricCard label="Keystrokes" value={String(scopedKeystrokes)} />
-        <MetricCard label="Clicks" value={String(scopedClicks)} />
-        <MetricCard label="Idle Min" value={String(scopedIdleMinutes)} />
-        <MetricCard label="Shots" value={String(scopedScreenshotsCount)} />
+        <MetricCard label="Duration" value={displayDuration(scopedDurationSeconds)} />
+        <MetricCard label="Payable" value={isNonWorkSelection ? "Not applicable" : formatMoney(scopedPay)} />
+        <MetricCard label="Avg Activity" value={isNonWorkSelection ? "Not applicable" : scopedAverageActivity === null ? "-" : formatPercent(scopedAverageActivity)} />
+        <MetricCard label="Score" value={isNonWorkSelection ? "Not applicable" : String(scopedScore ?? 0)} />
+        <MetricCard label="Keystrokes" value={isNonWorkSelection ? "Not applicable" : String(scopedKeystrokes)} />
+        <MetricCard label="Clicks" value={isNonWorkSelection ? "Not applicable" : String(scopedClicks)} />
+        <MetricCard label="Idle Min" value={isNonWorkSelection ? "Not applicable" : String(scopedIdleMinutes ?? 0)} />
+        <MetricCard label="Screenshots" value={isNonWorkSelection ? "Not applicable" : String(scopedScreenshotsCount)} />
       </div>
 
-      {selectedActivity && !selectedSession ? (
+      {nonWorkActivity ? (
         <div className="selection-note">
-          <strong>{selectedActivity.reason}</strong>
-          <p>No keyboard, mouse, screenshot, or app detail exists for this non-working period.</p>
+          <strong>{nonWorkActivity.endedBy}</strong>
+          <p>{nonWorkActivity.explanation}</p>
         </div>
       ) : null}
 
       <div className="app-usage-list">
         <div className="app-usage-row">
           <span>
-            <strong>{selectedSession ? "Session reason" : "Latest login device"}</strong>
+            <strong>{selectedSession ? "Ended by" : selectedActivity ? "Period type" : "Latest login device"}</strong>
             <small>
               {selectedSession
-                ? stopReasonLabel(selectedSession)
-                : detail.lastDevice
-                  ? deviceLabel(detail.lastDevice.hostname, detail.lastDevice.os_username)
-                  : "No device recorded yet"}
+                ? stopReasonShortLabel(selectedSession)
+                : selectedActivity
+                  ? selectedActivity.title
+                  : detail.lastDevice
+                    ? deviceLabel(detail.lastDevice.hostname, detail.lastDevice.os_username)
+                    : "No device recorded yet"}
             </small>
           </span>
-          <b>{selectedSession ? "Why it ended" : "Access"}</b>
+          <b>{selectedSession ? "Reason" : selectedActivity ? "What this means" : "Access"}</b>
         </div>
         {selectedSession ? (
           <div className="app-usage-row">
             <span>
-              <strong>Session device</strong>
-              <small>{selectedSession.device_hostname ? deviceLabel(selectedSession.device_hostname, selectedSession.device_os_username) : "Device not captured"}</small>
+              <strong>Explanation</strong>
+              <small>{stopReasonExplanation(selectedSession)}</small>
             </span>
-            <b>PC</b>
+            <b>Help</b>
+          </div>
+        ) : selectedActivity ? (
+          <div className="app-usage-row">
+            <span>
+              <strong>Explanation</strong>
+              <small>{selectedActivity.explanation}</small>
+            </span>
+            <b>Help</b>
           </div>
         ) : detail.lastDevice ? (
           <div className="app-usage-row">
@@ -699,9 +690,18 @@ function SelectionDetailsCard({
             <b>Live</b>
           </div>
         ) : null}
+        {selectedSession ? (
+          <div className="app-usage-row">
+            <span>
+              <strong>Session device</strong>
+              <small>{selectedSession.device_hostname ? deviceLabel(selectedSession.device_hostname, selectedSession.device_os_username) : "Device not captured"}</small>
+            </span>
+            <b>PC</b>
+          </div>
+        ) : null}
       </div>
 
-      <SectionTitle eyebrow="Apps" title={selectedSession ? "Apps in This Session" : "Apps in This Time Window"} />
+      <SectionTitle eyebrow="Apps" title={selectedSession ? "Apps in This Work Session" : selectedActivity ? `Apps During ${selectedActivity.title}` : "Apps in This Time Window"} />
       <div className="app-usage-list">
         {scopedAppUsage.length ? (
           scopedAppUsage.map((app) => {
@@ -720,7 +720,11 @@ function SelectionDetailsCard({
             );
           })
         ) : (
-          <EmptySmall icon={Monitor} title="No app data yet" text="App activity appears for tracked work sessions only." />
+          <EmptySmall
+            icon={Monitor}
+            title={selectedActivity && !selectedSession ? "No app data for this period" : "No app data yet"}
+            text={selectedActivity && !selectedSession ? "Apps are only recorded during active work sessions." : "App activity appears for tracked work sessions only."}
+          />
         )}
       </div>
     </>
@@ -736,9 +740,23 @@ function MetricCard({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ActivityChart({ logs, timezone }: { logs: ActivityLog[]; timezone: string }) {
+function ActivityChart({
+  logs,
+  selectedActivity,
+  timezone,
+}: {
+  logs: ActivityLog[];
+  selectedActivity: ActivityLogItem | null;
+  timezone: string;
+}) {
   if (!logs.length) {
-    return <EmptySmall icon={Activity} title="No activity logs yet" text="Minute activity appears while the desktop timer is running." />;
+    return (
+      <EmptySmall
+        icon={Activity}
+        title={selectedActivity && !selectedActivity.session ? "No activity for this period" : "No activity logs yet"}
+        text={selectedActivity && !selectedActivity.session ? "Minute-by-minute activity is only recorded during active work sessions." : "Minute activity appears while the desktop timer is running."}
+      />
+    );
   }
 
   const sampledLogs = sampleLogs(logs, 72);
@@ -789,14 +807,14 @@ function PayrollPanel({
             <span>Payable</span>
           </div>
           <div className="table-row data-row payroll-table-row">
-            <span>{formatHours(selectedActivity.durationSeconds)}</span>
+            <span>{displayDuration(selectedActivity.durationSeconds)}</span>
             <span>{formatMoney(hourlyRate)}/hr</span>
             <span>{formatMoney(earningsForSeconds(selectedActivity.durationSeconds, hourlyRate))}</span>
           </div>
         </Table>
         <div className="selection-note">
           <strong>{formatDateTimeFull(selectedActivity.startedAt, timezone)}</strong>
-          <p>{stopReasonLabel(selectedSession)}</p>
+          <p>{stopReasonExplanation(selectedSession)}</p>
         </div>
       </>
     );
@@ -805,8 +823,8 @@ function PayrollPanel({
   if (selectedActivity && !selectedSession) {
     return (
       <>
-        <SectionTitle eyebrow="Payroll" title="Selected Period Pay" />
-        <EmptySmall icon={Clock3} title="No payable time" text="Breaks, idle gaps, stopped periods, and disconnected periods do not create payroll." />
+        <SectionTitle eyebrow="Payroll" title={`${selectedActivity.title} Pay`} />
+        <EmptySmall icon={Clock3} title="No payable time" text="Breaks, idle periods, offline gaps, and not-tracking periods do not create payroll." />
       </>
     );
   }
@@ -829,13 +847,13 @@ function PayrollPanel({
             {detail.dailyPay.map((day) => (
               <div className="table-row data-row payroll-table-row" key={day.date}>
                 <span>{day.date}</span>
-                <span>{formatHours(day.seconds)}</span>
+                <span>{displayDuration(day.seconds)}</span>
                 <span>{formatMoney(day.earnings)}</span>
               </div>
             ))}
             <div className="table-row data-row payroll-table-row payroll-total-row">
               <span>Total</span>
-              <span>{formatHours(totalSeconds)}</span>
+              <span>{displayDuration(totalSeconds)}</span>
               <span>{formatMoney(totalPay)}</span>
             </div>
           </>
@@ -863,7 +881,7 @@ function ScreenshotsPanel({
   timezone: string;
 }) {
   if (selectedActivity && !selectedSession) {
-    return <EmptySmall icon={Camera} title="No screenshots for this period" text="Screenshots exist only while a work session is actively being tracked." />;
+    return <EmptySmall icon={Camera} title="No screenshots for this period" text="Screenshots are only captured while a work session is actively being tracked." />;
   }
 
   if (selectedSession) {
@@ -998,9 +1016,10 @@ function buildActivityLogItems(detail: VaDetail | null): ActivityLogItem[] {
 
     items.push({
       id: entry.id,
-      kind: "session",
-      title: "Work Session",
-      reason: stopReasonLabel(entry),
+      kind: "work",
+      title: "Work",
+      endedBy: stopReasonShortLabel(entry),
+      explanation: stopReasonExplanation(entry),
       startedAt: segment.displayStartedAt,
       endedAt: segment.displayStoppedAt,
       durationSeconds: segment.durationSeconds,
@@ -1014,9 +1033,10 @@ function buildActivityLogItems(detail: VaDetail | null): ActivityLogItem[] {
   if (!entries.length && new Date(detail.rangeEnd).getTime() - new Date(detail.rangeStart).getTime() >= 60_000) {
     items.push({
       id: "untracked-empty-range",
-      kind: "untracked",
-      title: "Untracked",
-      reason: "No tracked session in this time window",
+      kind: "not_tracking",
+      title: "Not Tracking",
+      endedBy: "-",
+      explanation: "No timer was running during this part of the selected time window.",
       startedAt: detail.rangeStart,
       endedAt: detail.rangeEnd,
       durationSeconds: Math.max(0, Math.floor((new Date(detail.rangeEnd).getTime() - new Date(detail.rangeStart).getTime()) / 1000)),
@@ -1042,10 +1062,11 @@ function buildGapItem(
 
   if (!previousEntry) {
     return {
-      id: `gap-${index}-untracked`,
-      kind: "untracked",
-      title: "Untracked",
-      reason: "No tracked session",
+      id: `gap-${index}-not-tracking`,
+      kind: "not_tracking",
+      title: "Not Tracking",
+      endedBy: "-",
+      explanation: "No timer was running during this part of the selected time window.",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1059,7 +1080,8 @@ function buildGapItem(
       id: `gap-${index}-break`,
       kind: "break",
       title: "Break",
-      reason: "Break started",
+      endedBy: "Break started",
+      explanation: "The VA paused tracked work and stayed on break until the next work session began.",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1073,7 +1095,8 @@ function buildGapItem(
       id: `gap-${index}-idle`,
       kind: "idle",
       title: "Idle",
-      reason: "Idle timeout",
+      endedBy: "Inactivity",
+      explanation: "Tracking had already stopped because there was no keyboard or mouse activity for the idle limit.",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1086,8 +1109,11 @@ function buildGapItem(
     return {
       id: `gap-${index}-offline`,
       kind: "offline",
-      title: "Disconnected",
-      reason: previousEntry.stop_reason === "crash" ? "Possible crash" : "App closed",
+      title: "Offline",
+      endedBy: previousEntry.stop_reason === "crash" ? "Connection lost" : "App closed",
+      explanation: previousEntry.stop_reason === "crash"
+        ? "The previous work session was closed automatically after the connection was lost."
+        : "The previous work session ended because the desktop app was closed.",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1097,10 +1123,11 @@ function buildGapItem(
   }
 
   return {
-    id: `gap-${index}-stopped`,
-    kind: "stopped",
-    title: "Stopped",
-    reason: "Stopped by VA",
+    id: `gap-${index}-not-tracking`,
+    kind: "not_tracking",
+    title: "Not Tracking",
+    endedBy: "User stopped",
+    explanation: "The VA had stopped tracking, and no new work session had started yet.",
     startedAt,
     endedAt,
     durationSeconds,
@@ -1171,15 +1198,48 @@ function totalBreakSeconds(items: ActivityLogItem[]) {
   return items.filter((item) => item.kind === "break").reduce((sum, item) => sum + item.durationSeconds, 0);
 }
 
-function stopReasonLabel(entry: VaDetail["timeEntries"][number]) {
+function stopReasonShortLabel(entry: VaDetail["timeEntries"][number]) {
   if (entry.is_manual) return "Manual entry";
   if (!entry.stopped_at) return "Running";
-  if (entry.stop_reason === "manual") return "Stopped by VA";
-  if (entry.stop_reason === "idle") return "Auto-stopped: idle timeout";
+  if (entry.stop_reason === "manual") return "User stopped";
+  if (entry.stop_reason === "idle") return "Inactivity";
   if (entry.stop_reason === "app_close") return "App closed";
-  if (entry.stop_reason === "crash") return "Auto-closed: possible crash";
+  if (entry.stop_reason === "crash") return "Connection lost";
   if (entry.stop_reason === "break") return "Break started";
   return "Stopped";
+}
+
+function stopReasonExplanation(entry: VaDetail["timeEntries"][number]) {
+  if (entry.is_manual) return "This time was added manually by an admin as a correction or approved adjustment.";
+  if (!entry.stopped_at) return "This work session is still running.";
+  if (entry.stop_reason === "manual") return "The VA stopped this work session manually.";
+  if (entry.stop_reason === "idle") return "This work session ended automatically after no keyboard or mouse activity was detected for the idle limit.";
+  if (entry.stop_reason === "app_close") return "This work session ended because the desktop app was closed.";
+  if (entry.stop_reason === "crash") return "This work session was closed automatically after the connection or app was lost.";
+  if (entry.stop_reason === "break") return "This work session ended because the VA started a break.";
+  return "This work session ended.";
+}
+
+function buildActivitySummary(items: ActivityLogItem[]): ActivitySummaryBucket[] {
+  const buckets = new Map<ActivityLogItem["kind"], ActivitySummaryBucket>([
+    ["work", { kind: "work", title: "Work", tone: "work", totalSeconds: 0 }],
+    ["break", { kind: "break", title: "Break", tone: "break", totalSeconds: 0 }],
+    ["idle", { kind: "idle", title: "Idle", tone: "alert", totalSeconds: 0 }],
+    ["offline", { kind: "offline", title: "Offline", tone: "alert", totalSeconds: 0 }],
+    ["not_tracking", { kind: "not_tracking", title: "Not Tracking", tone: "neutral", totalSeconds: 0 }],
+  ]);
+
+  for (const item of items) {
+    const bucket = buckets.get(item.kind);
+    if (!bucket) continue;
+    bucket.totalSeconds += item.durationSeconds;
+  }
+
+  return [...buckets.values()];
+}
+
+function displayDuration(seconds: number) {
+  return seconds > 0 && seconds < 60 ? "<1m" : formatHours(seconds);
 }
 
 function sampleLogs(logs: ActivityLog[], maxBars: number) {
@@ -1199,17 +1259,6 @@ function sampleLogs(logs: ActivityLog[], maxBars: number) {
   }
 
   return sampled;
-}
-
-function timelinePosition(startedAt: string, endedAt: string, rangeStart: string, rangeEnd: string) {
-  const rangeStartMs = new Date(rangeStart).getTime();
-  const rangeMs = Math.max(1, new Date(rangeEnd).getTime() - rangeStartMs);
-  const startMs = new Date(startedAt).getTime() - rangeStartMs;
-  const widthMs = Math.max(new Date(endedAt).getTime() - new Date(startedAt).getTime(), 5 * 60 * 1000);
-  return {
-    left: Math.max(0, Math.min(100, (startMs / rangeMs) * 100)),
-    width: Math.max(1, Math.min(100, (widthMs / rangeMs) * 100)),
-  };
 }
 
 function buildDateRange(mode: RangeMode, customStart: string, customEnd: string, timezone: string): DetailDateRange {
