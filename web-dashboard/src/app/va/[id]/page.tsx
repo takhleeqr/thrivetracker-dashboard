@@ -36,6 +36,8 @@ type ActivityLogItem = {
   title: string;
   endedBy: string;
   explanation: string;
+  projectLabel: string;
+  deviceLabel: string;
   startedAt: string;
   endedAt: string;
   durationSeconds: number;
@@ -327,7 +329,7 @@ export default function VaDetailPage() {
               <ActivityLogTable items={activityItems} onSelect={setSelectedActivityId} selectedId={selectedActivityId} timezone={timezone} />
             </Card>
 
-            <Card className="detail-card">
+            <Card className="detail-card detail-side-card">
               <SelectionDetailsCard
                 detail={detail}
                 onClear={() => setSelectedActivityId(null)}
@@ -537,6 +539,8 @@ function ActivityLogTable({
         <span>Type</span>
         <span>Duration</span>
         <span>Ended By</span>
+        <span>Project</span>
+        <span>Device</span>
         <span className="metric-col">Activity</span>
         <span className="metric-col">Keys</span>
         <span className="metric-col">Clicks</span>
@@ -562,6 +566,14 @@ function ActivityLogTable({
           <span className="activity-log-reason" title={item.explanation}>
             <strong>{item.endedBy}</strong>
             <small>{item.kind === "work" ? "Hover for explanation" : "Not applicable"}</small>
+          </span>
+          <span className="activity-log-context" title={item.projectLabel}>
+            <strong>{item.projectLabel}</strong>
+            <small>Project</small>
+          </span>
+          <span className="activity-log-context" title={item.deviceLabel}>
+            <strong>{item.deviceLabel}</strong>
+            <small>Device</small>
           </span>
           <span className="metric-col">{item.session?.averageActivityPercent === null || item.session === null ? "-" : formatPercent(item.session.averageActivityPercent)}</span>
           <span className="metric-col">{item.session?.totalKeystrokes ?? "-"}</span>
@@ -632,14 +644,14 @@ function SelectionDetailsCard({
       </div>
 
       <div className="detail-metric-grid">
-        <MetricCard label="Duration" value={displayDuration(scopedDurationSeconds)} />
-        <MetricCard label="Payable" value={isNonWorkSelection ? "Not applicable" : formatMoney(scopedPay)} />
-        <MetricCard label="Avg Activity" value={isNonWorkSelection ? "Not applicable" : scopedAverageActivity === null ? "-" : formatPercent(scopedAverageActivity)} />
-        <MetricCard label="Score" value={isNonWorkSelection ? "Not applicable" : String(scopedScore ?? 0)} />
-        <MetricCard label="Keystrokes" value={isNonWorkSelection ? "Not applicable" : String(scopedKeystrokes)} />
-        <MetricCard label="Clicks" value={isNonWorkSelection ? "Not applicable" : String(scopedClicks)} />
-        <MetricCard label="Idle Min" value={isNonWorkSelection ? "Not applicable" : String(scopedIdleMinutes ?? 0)} />
-        <MetricCard label="Screenshots" value={isNonWorkSelection ? "Not applicable" : String(scopedScreenshotsCount)} />
+        <MetricCard label="Duration" tone="hours" value={displayDuration(scopedDurationSeconds)} />
+        <MetricCard label="Payable" tone="earnings" value={isNonWorkSelection ? "Not applicable" : formatMoney(scopedPay)} />
+        <MetricCard label="Avg Activity" tone="activity" value={isNonWorkSelection ? "Not applicable" : scopedAverageActivity === null ? "-" : formatPercent(scopedAverageActivity)} />
+        <MetricCard label="Score" tone="score" value={isNonWorkSelection ? "Not applicable" : String(scopedScore ?? 0)} />
+        <MetricCard label="Keystrokes" tone="work" value={isNonWorkSelection ? "Not applicable" : String(scopedKeystrokes)} />
+        <MetricCard label="Clicks" tone="work" value={isNonWorkSelection ? "Not applicable" : String(scopedClicks)} />
+        <MetricCard label="Idle Min" tone="alert" value={isNonWorkSelection ? "Not applicable" : String(scopedIdleMinutes ?? 0)} />
+        <MetricCard label="Screenshots" tone="screenshots" value={isNonWorkSelection ? "Not applicable" : String(scopedScreenshotsCount)} />
       </div>
 
       {nonWorkActivity ? (
@@ -731,9 +743,9 @@ function SelectionDetailsCard({
   );
 }
 
-function MetricCard({ label, value }: { label: string; value: string }) {
+function MetricCard({ label, tone, value }: { label: string; tone: string; value: string }) {
   return (
-    <div className="detail-metric-card">
+    <div className={`detail-metric-card metric-tone-${tone}`}>
       <small>{label}</small>
       <strong>{value}</strong>
     </div>
@@ -1020,6 +1032,8 @@ function buildActivityLogItems(detail: VaDetail | null): ActivityLogItem[] {
       title: "Work",
       endedBy: stopReasonShortLabel(entry),
       explanation: stopReasonExplanation(entry),
+      projectLabel: entry.projectName,
+      deviceLabel: entry.device_hostname ? deviceLabel(entry.device_hostname, entry.device_os_username) : "Device not captured",
       startedAt: segment.displayStartedAt,
       endedAt: segment.displayStoppedAt,
       durationSeconds: segment.durationSeconds,
@@ -1037,6 +1051,8 @@ function buildActivityLogItems(detail: VaDetail | null): ActivityLogItem[] {
       title: "Not Tracking",
       endedBy: "-",
       explanation: "No timer was running during this part of the selected time window.",
+      projectLabel: "-",
+      deviceLabel: "-",
       startedAt: detail.rangeStart,
       endedAt: detail.rangeEnd,
       durationSeconds: Math.max(0, Math.floor((new Date(detail.rangeEnd).getTime() - new Date(detail.rangeStart).getTime()) / 1000)),
@@ -1067,6 +1083,8 @@ function buildGapItem(
       title: "Not Tracking",
       endedBy: "-",
       explanation: "No timer was running during this part of the selected time window.",
+      projectLabel: "-",
+      deviceLabel: "-",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1082,6 +1100,8 @@ function buildGapItem(
       title: "Break",
       endedBy: "-",
       explanation: "The VA paused tracked work and stayed on break until the next work session began.",
+      projectLabel: previousEntry.projectName,
+      deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1097,6 +1117,8 @@ function buildGapItem(
       title: "Idle",
       endedBy: "-",
       explanation: "Tracking had already stopped because there was no keyboard or mouse activity for the idle limit.",
+      projectLabel: previousEntry.projectName,
+      deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1114,6 +1136,8 @@ function buildGapItem(
       explanation: previousEntry.stop_reason === "crash"
         ? "The previous work session was closed automatically after the connection was lost."
         : "The previous work session ended because the desktop app was closed.",
+      projectLabel: previousEntry.projectName,
+      deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
       endedAt,
       durationSeconds,
@@ -1128,6 +1152,8 @@ function buildGapItem(
     title: "Not Tracking",
     endedBy: "-",
     explanation: "The VA had stopped tracking, and no new work session had started yet.",
+    projectLabel: previousEntry.projectName,
+    deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
     startedAt,
     endedAt,
     durationSeconds,

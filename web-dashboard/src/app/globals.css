@@ -651,13 +651,13 @@ select {
 
 .detail-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.7fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(420px, 0.9fr);
   gap: 18px;
   margin-bottom: 18px;
 }
 
 .detail-grid-wide {
-  grid-template-columns: minmax(0, 1fr) minmax(460px, 0.85fr);
+  grid-template-columns: minmax(0, 1fr) minmax(520px, 0.95fr);
   align-items: start;
 }
 
@@ -801,10 +801,21 @@ select {
 .activity-log-head,
 .activity-log-row {
   display: grid;
-  grid-template-columns: 150px 110px 80px 180px 72px 72px 72px 78px 60px;
+  grid-template-columns:
+    minmax(110px, 1.05fr)
+    minmax(92px, 0.82fr)
+    minmax(74px, 0.68fr)
+    minmax(150px, 1.1fr)
+    minmax(140px, 1fr)
+    minmax(140px, 1fr)
+    minmax(58px, 0.5fr)
+    minmax(58px, 0.5fr)
+    minmax(58px, 0.5fr)
+    minmax(66px, 0.56fr)
+    minmax(50px, 0.4fr);
   gap: 12px;
-  width: max-content;
-  min-width: 918px;
+  width: 100%;
+  min-width: 1200px;
   padding: 12px 14px;
 }
 
@@ -875,6 +886,11 @@ select {
   font-size: 14px;
 }
 
+.activity-log-context strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
 .metric-col {
   text-align: right;
   justify-self: end;
@@ -896,6 +912,7 @@ select {
   border-radius: 8px;
   background: #fcfbf8;
   padding: 12px;
+  border-top-width: 4px;
 }
 
 .detail-metric-card small {
@@ -912,11 +929,61 @@ select {
   font-size: 22px;
 }
 
+.detail-side-card {
+  background:
+    linear-gradient(180deg, rgba(244, 248, 255, 0.95) 0%, rgba(255, 255, 255, 0.97) 24%),
+    rgba(255, 255, 255, 0.97);
+}
+
+.detail-side-card .section-heading h3 {
+  color: #0f172a;
+}
+
+.detail-side-card .detail-metric-grid {
+  gap: 12px;
+}
+
+.metric-tone-hours {
+  background: #f5f9ff;
+  border-top-color: #2563eb;
+}
+
+.metric-tone-earnings {
+  background: #f3fff8;
+  border-top-color: #16a34a;
+}
+
+.metric-tone-activity {
+  background: #f2fdfa;
+  border-top-color: #0f766e;
+}
+
+.metric-tone-score {
+  background: #faf5ff;
+  border-top-color: #7c3aed;
+}
+
+.metric-tone-work {
+  background: #f7fbff;
+  border-top-color: #2563eb;
+}
+
+.metric-tone-alert {
+  background: #fff7f7;
+  border-top-color: #dc2626;
+}
+
+.metric-tone-screenshots {
+  background: #f5f7ff;
+  border-top-color: #4f46e5;
+}
+
 .selection-note {
   margin-top: 16px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--surface-soft);
+  background: #f8fbff;
+  border-left: 4px solid #2563eb;
   padding: 12px 14px;
 }
 
@@ -993,6 +1060,19 @@ select {
   display: grid;
   gap: 8px;
   margin-top: 18px;
+}
+
+.detail-side-card .app-usage-row {
+  background: #ffffff;
+  border-left: 4px solid #dbeafe;
+}
+
+.detail-side-card .app-usage-row strong {
+  color: #0f172a;
+}
+
+.detail-side-card .app-usage-row b {
+  color: #1d4ed8;
 }
 
 .screenshot-grid {
