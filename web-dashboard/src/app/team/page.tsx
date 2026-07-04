@@ -30,6 +30,9 @@ const emptyForm: VaFormInput = {
   expectedHoursPerWeek: "0",
   hourlyRate: "0",
   assignedProjectIds: [],
+  scheduleType: "flexible",
+  shiftStartTime: "09:00",
+  shiftEndTime: "17:00",
   workingDays: [],
 };
 
@@ -214,6 +217,7 @@ export default function TeamPage() {
                 <span>Rate</span>
                 <span>Weekly Hours</span>
                 <span>Expected</span>
+                <span>Schedule</span>
                 <span>Latest Device</span>
                 <span>Last Seen</span>
                 <span>Status</span>
@@ -232,6 +236,10 @@ export default function TeamPage() {
                     <span>${va.hourlyRate.toFixed(2)}/hr</span>
                     <span>{formatHours(va.totalHoursSeconds)}</span>
                     <span>{va.expectedHoursPerWeek ? `${va.expectedHoursPerWeek}h` : "-"}</span>
+                    <span>
+                      <strong>{va.scheduleType === "fixed" ? "Fixed shift" : "Flexible"}</strong>
+                      <small>{scheduleSummary(va)}</small>
+                    </span>
                     <span>
                       {va.lastDevice ? (
                         <>
@@ -328,6 +336,15 @@ function VaEditor({
     onChange({ ...form, workingDays: [...workingDays] });
   }
 
+  function setScheduleType(value: "flexible" | "fixed") {
+    onChange({
+      ...form,
+      scheduleType: value,
+      shiftStartTime: form.shiftStartTime || "09:00",
+      shiftEndTime: form.shiftEndTime || "17:00",
+    });
+  }
+
   return (
     <div className="modal-backdrop">
       <ModalFrame className="project-editor">
@@ -400,16 +417,39 @@ function VaEditor({
         </div>
 
         <div className="assignment-box">
-          <p className="eyebrow">Working Days</p>
-          <div className="day-check-grid">
-            {workingDayOptions.map((day) => (
-              <label className="day-check" key={day.value}>
-                <input checked={form.workingDays.includes(day.value)} onChange={() => toggleWorkingDay(day.value)} type="checkbox" />
-                <span>{day.label}</span>
-              </label>
-            ))}
-          </div>
-          <p className="subtle-line">Leave all unchecked to exclude this VA from Late / No Show schedule alerts.</p>
+          <p className="eyebrow">Schedule</p>
+          <label className="schedule-type-field">
+            Schedule Type
+            <select className="field" onChange={(event) => setScheduleType(event.target.value as "flexible" | "fixed")} value={form.scheduleType}>
+              <option value="flexible">Flexible / No schedule</option>
+              <option value="fixed">Fixed shift</option>
+            </select>
+          </label>
+          {form.scheduleType === "fixed" ? (
+            <>
+              <div className="editor-grid schedule-time-grid">
+                <label>
+                  Shift Start
+                  <Input onChange={(event) => onChange({ ...form, shiftStartTime: event.target.value })} type="time" value={form.shiftStartTime} />
+                </label>
+                <label>
+                  Shift End
+                  <Input onChange={(event) => onChange({ ...form, shiftEndTime: event.target.value })} type="time" value={form.shiftEndTime} />
+                </label>
+              </div>
+              <div className="day-check-grid">
+                {workingDayOptions.map((day) => (
+                  <label className="day-check" key={day.value}>
+                    <input checked={form.workingDays.includes(day.value)} onChange={() => toggleWorkingDay(day.value)} type="checkbox" />
+                    <span>{day.label}</span>
+                  </label>
+                ))}
+              </div>
+              <p className="subtle-line">Late and No Show alerts will only apply on the selected days during this shift window.</p>
+            </>
+          ) : (
+            <p className="subtle-line">Flexible VAs can complete their hours any time in the day, so Late and No Show alerts stay off.</p>
+          )}
         </div>
 
         <div className="assignment-box">
@@ -464,6 +504,20 @@ function vaToForm(va: ManagedVa): VaFormInput {
     expectedHoursPerWeek: String(va.expectedHoursPerWeek ?? 0),
     hourlyRate: String(va.hourlyRate ?? 0),
     assignedProjectIds: va.assignedProjectIds,
+    scheduleType: va.scheduleType,
+    shiftStartTime: va.shiftStartTime ?? "09:00",
+    shiftEndTime: va.shiftEndTime ?? "17:00",
     workingDays: va.workingDays,
   };
+}
+
+function scheduleSummary(va: ManagedVa) {
+  if (va.scheduleType !== "fixed") {
+    return "Any time during the day";
+  }
+
+  const days = va.workingDays.length ? va.workingDays.map((day) => day.slice(0, 1).toUpperCase() + day.slice(1, 3)).join(", ") : "No days set";
+  const start = va.shiftStartTime?.slice(0, 5) ?? "--:--";
+  const end = va.shiftEndTime?.slice(0, 5) ?? "--:--";
+  return `${days} | ${start} - ${end}`;
 }

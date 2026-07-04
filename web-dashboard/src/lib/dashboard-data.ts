@@ -11,6 +11,9 @@ export type Profile = {
   last_seen_at: string | null;
   hourly_rate?: number;
   expected_hours_per_week?: number;
+  schedule_type?: "flexible" | "fixed" | null;
+  shift_start_time?: string | null;
+  shift_end_time?: string | null;
   working_days?: string[];
 };
 
@@ -134,7 +137,7 @@ export type DashboardRow = {
   email: string;
   status: "working" | "on_break" | "idle" | "stopped" | "offline" | "day_off";
   statusDetail: string;
-  scheduleStatus: "on_time" | "late" | "no_show" | "day_off" | "not_set";
+  scheduleStatus: "on_time" | "late" | "no_show" | "day_off" | "flexible" | "not_set";
   currentProject: string;
   currentProjectId: string | null;
   hoursTodaySeconds: number;
@@ -215,7 +218,7 @@ export async function loadAdminProfile(supabase: SupabaseClient): Promise<Profil
 export async function loadDashboardSummary(
   supabase: SupabaseClient,
   timezone = "Asia/Karachi",
-  settings?: Partial<Pick<AppSettings, "late_start_time" | "work_end_time" | "low_activity_threshold" | "low_activity_minimum_minutes">>,
+  settings?: Partial<Pick<AppSettings, "low_activity_threshold" | "low_activity_minimum_minutes">>,
   options: { includePersistedAlerts?: boolean; range?: DetailDateRange } = {},
 ): Promise<DashboardSummary> {
   const includePersistedAlerts = options.includePersistedAlerts ?? false;
@@ -230,7 +233,7 @@ export async function loadDashboardSummary(
   const [profilesResult, projectsResult, entriesResult, activityResult, screenshotsResult, persistedAlertsResult] = await Promise.all([
     supabase
       .from("profiles")
-      .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate,expected_hours_per_week,working_days")
+      .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate,expected_hours_per_week,schedule_type,shift_start_time,shift_end_time,working_days")
       .eq("role", "va")
       .eq("is_active", true)
       .order("full_name", { ascending: true }),
@@ -298,7 +301,7 @@ export async function loadDashboardSummary(
     const activityPercent = averageActivity(userRangeLogs) ?? latestLog?.activity_percent ?? null;
     const baseStatus = getStatus(activeEntry, latestEntry, profile.last_seen_at, now);
     const status = getDisplayStatus(profile, activeEntry, latestEntry, userTodayEntries, baseStatus, timezone, now);
-    const scheduleStatus = getScheduleStatus(profile, userTodayEntries, timezone, settings?.late_start_time ?? "10:00", settings?.work_end_time ?? "17:00", now);
+    const scheduleStatus = getScheduleStatus(profile, userTodayEntries, timezone, now);
     const hoursTodaySeconds = totalSecondsInRange(userEntries, selectedRange, now, profile.last_seen_at, status);
     const weeklyHoursSeconds = totalSecondsInRange(userEntries, currentWeekRange(timezone), now, profile.last_seen_at, status);
     const hourlyRate = Number(profile.hourly_rate ?? 0);
@@ -384,7 +387,7 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult, userDevicesResult] = await Promise.all([
     supabase
       .from("profiles")
-      .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate")
+      .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate,schedule_type,shift_start_time,shift_end_time,working_days")
       .eq("id", userId)
       .eq("role", "va")
       .maybeSingle(),
@@ -552,9 +555,10 @@ function getDisplayStatus(
   timezone: string,
   now: number,
 ): DashboardRow["status"] {
+  const scheduleType = normalizedScheduleType(profile);
   const workingDays = profile.working_days ?? [];
   if (baseStatus !== "offline") return baseStatus;
-  if (workingDays.length && !workingDays.includes(weekdayKey(new Date(), timezone)) && !todayEntries.length) {
+  if (scheduleType === "fixed" && workingDays.length && !workingDays.includes(weekdayKey(new Date(), timezone)) && !todayEntries.length) {
     return "day_off";
   }
   return "offline";
@@ -564,17 +568,18 @@ function getScheduleStatus(
   profile: Profile,
   todayEntries: TimeEntry[],
   timezone: string,
-  lateStartTime: string,
-  workEndTime: string,
   now: number,
 ): DashboardRow["scheduleStatus"] {
+  const scheduleType = normalizedScheduleType(profile);
+  if (scheduleType !== "fixed") return "flexible";
+
   const workingDays = profile.working_days ?? [];
-  if (!workingDays.length) return "not_set";
+  if (!workingDays.length || !profile.shift_start_time || !profile.shift_end_time) return "not_set";
   if (!workingDays.includes(weekdayKey(new Date(), timezone))) return "day_off";
 
   const todayInput = todayDateInputValue(timezone);
-  const lateStartAt = zonedDateTimeToUtc(todayInput, safeTime(lateStartTime, "10:00"), timezone).getTime();
-  const workEndAt = zonedDateTimeToUtc(todayInput, safeTime(workEndTime, "17:00"), timezone).getTime();
+  const lateStartAt = zonedDateTimeToUtc(todayInput, safeTime(profile.shift_start_time, "09:00"), timezone).getTime();
+  const workEndAt = zonedDateTimeToUtc(todayInput, safeTime(profile.shift_end_time, "17:00"), timezone).getTime();
   const firstEntry = [...todayEntries].sort((first, second) => new Date(first.started_at).getTime() - new Date(second.started_at).getTime())[0];
 
   if (firstEntry) {
@@ -588,6 +593,12 @@ function getScheduleStatus(
 
 function weekdayKey(value: Date, timezone: string) {
   return new Intl.DateTimeFormat("en-US", { timeZone: timezone, weekday: "short" }).format(value).toLowerCase().slice(0, 3);
+}
+
+function normalizedScheduleType(profile: Profile) {
+  if (profile.schedule_type === "fixed") return "fixed";
+  if ((profile.working_days ?? []).length > 0) return "fixed";
+  return "flexible";
 }
 
 function safeTime(value: string | undefined, fallback: string) {

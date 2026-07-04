@@ -581,6 +581,11 @@ select {
   color: var(--muted);
 }
 
+.schedule-flexible {
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+
 .toast {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1193,7 +1198,7 @@ select {
 }
 
 .team-table-row {
-  grid-template-columns: 1.05fr 1.15fr 0.55fr 0.7fr 0.55fr 1fr 0.9fr 0.6fr 1.1fr;
+  grid-template-columns: 1fr 1.05fr 0.55fr 0.65fr 0.55fr 1fr 1fr 0.85fr 0.6fr 1.05fr;
 }
 
 .project-name-cell {
@@ -1369,6 +1374,18 @@ select {
   background: white;
   padding: 9px 8px;
   font-weight: 800;
+}
+
+.schedule-type-field {
+  display: grid;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.schedule-time-grid {
+  margin-top: 14px;
 }
 
 .modal-actions {

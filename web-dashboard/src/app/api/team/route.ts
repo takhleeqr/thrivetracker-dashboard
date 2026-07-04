@@ -11,10 +11,14 @@ type VaPayload = {
   password?: string;
   hourlyRate?: string | number;
   isActive?: boolean;
+  scheduleType?: string;
+  shiftStartTime?: string;
+  shiftEndTime?: string;
   workingDays?: string[];
 };
 
 const validWorkingDays = new Set(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
+const validScheduleTypes = new Set(["flexible", "fixed"]);
 
 export async function POST(request: NextRequest) {
   try {
@@ -49,7 +53,7 @@ export async function POST(request: NextRequest) {
       hourlyRate: numberFromPayload(payload.hourlyRate, 0),
       id: userId,
       isActive: payload.isActive ?? true,
-      workingDays: safeWorkingDays(payload.workingDays),
+      ...normalizeSchedule(payload),
     });
     await syncAssignments(userId, payload.assignedProjectIds ?? []);
 
@@ -86,7 +90,7 @@ export async function PATCH(request: NextRequest) {
     full_name: fullName,
     hourly_rate: numberFromPayload(payload.hourlyRate, 0),
     is_active: payload.isActive ?? true,
-    working_days: safeWorkingDays(payload.workingDays),
+    ...profileSchedulePayload(normalizeSchedule(payload)),
   });
   await syncAssignments(payload.id, payload.assignedProjectIds ?? []);
 
@@ -142,6 +146,9 @@ async function upsertProfile(input: {
   hourlyRate: number;
   id: string;
   isActive: boolean;
+  scheduleType: "flexible" | "fixed";
+  shiftEndTime: string | null;
+  shiftStartTime: string | null;
   workingDays: string[];
 }) {
   await supabaseAdminFetch("/rest/v1/profiles?on_conflict=id", {
@@ -153,6 +160,9 @@ async function upsertProfile(input: {
       id: input.id,
       is_active: input.isActive,
       role: "va",
+      schedule_type: input.scheduleType,
+      shift_end_time: input.shiftEndTime,
+      shift_start_time: input.shiftStartTime,
       working_days: input.workingDays,
     }),
     headers: { prefer: "resolution=merge-duplicates" },
@@ -160,7 +170,7 @@ async function upsertProfile(input: {
   });
 }
 
-async function updateProfile(id: string, payload: Record<string, string | boolean | number | string[]>) {
+async function updateProfile(id: string, payload: Record<string, string | boolean | number | string[] | null>) {
   await supabaseAdminFetch(`/rest/v1/profiles?id=eq.${encodeURIComponent(id)}`, {
     body: JSON.stringify(payload),
     headers: { prefer: "return=minimal" },
@@ -177,6 +187,62 @@ function numberFromPayload(value: string | number | undefined, fallback: number)
 
 function safeWorkingDays(value: string[] | undefined) {
   return [...new Set(value ?? [])].filter((day) => validWorkingDays.has(day));
+}
+
+function normalizeSchedule(payload: VaPayload) {
+  const scheduleType = safeScheduleType(payload.scheduleType);
+  if (scheduleType === "flexible") {
+    return {
+      scheduleType,
+      shiftEndTime: null,
+      shiftStartTime: null,
+      workingDays: [] as string[],
+    };
+  }
+
+  const workingDays = safeWorkingDays(payload.workingDays);
+  if (!workingDays.length) {
+    throw new Error("Select at least one working day for a fixed shift.");
+  }
+
+  const shiftStartTime = safeTimeValue(payload.shiftStartTime, "Shift start time");
+  const shiftEndTime = safeTimeValue(payload.shiftEndTime, "Shift end time");
+
+  if (shiftEndTime <= shiftStartTime) {
+    throw new Error("Shift end time must be later than shift start time.");
+  }
+
+  return {
+    scheduleType,
+    shiftEndTime,
+    shiftStartTime,
+    workingDays,
+  };
+}
+
+function profileSchedulePayload(schedule: ReturnType<typeof normalizeSchedule>) {
+  return {
+    schedule_type: schedule.scheduleType,
+    shift_end_time: schedule.shiftEndTime,
+    shift_start_time: schedule.shiftStartTime,
+    working_days: schedule.workingDays,
+  };
+}
+
+function safeScheduleType(value: string | undefined): "flexible" | "fixed" {
+  if (!value || !validScheduleTypes.has(value)) {
+    return "flexible";
+  }
+
+  return value as "flexible" | "fixed";
+}
+
+function safeTimeValue(value: string | undefined, label: string) {
+  if (!/^\d{2}:\d{2}$/.test(value ?? "")) {
+    throw new Error(`${label} is required.`);
+  }
+
+  return value!;
 }
 
 async function syncAssignments(userId: string, assignedProjectIds: string[]) {

@@ -13,6 +13,9 @@ export type ManagedVa = {
   totalHoursSeconds: number;
   assignedProjectIds: string[];
   assignedProjects: string[];
+  scheduleType: "flexible" | "fixed";
+  shiftStartTime: string | null;
+  shiftEndTime: string | null;
   workingDays: string[];
   lastDevice: {
     hostname: string;
@@ -32,6 +35,9 @@ export type VaFormInput = {
   expectedHoursPerWeek: string;
   hourlyRate: string;
   assignedProjectIds: string[];
+  scheduleType: "flexible" | "fixed";
+  shiftStartTime: string;
+  shiftEndTime: string;
   workingDays: string[];
 };
 
@@ -49,6 +55,9 @@ type ProfileRow = {
   hourly_rate: number;
   created_at: string;
   last_seen_at: string | null;
+  schedule_type: "flexible" | "fixed" | null;
+  shift_start_time: string | null;
+  shift_end_time: string | null;
   working_days: string[];
 };
 
@@ -82,7 +91,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
   const [profilesResult, entriesResult, projectsResult, assignmentsResult, devicesResult] = await Promise.all([
     supabase
       .from("profiles")
-      .select("id,full_name,email,is_active,created_at,last_seen_at,hourly_rate,expected_hours_per_week,working_days")
+      .select("id,full_name,email,is_active,created_at,last_seen_at,hourly_rate,expected_hours_per_week,schedule_type,shift_start_time,shift_end_time,working_days")
       .eq("role", "va")
       .order("full_name", { ascending: true }),
     supabase.from("time_entries").select("user_id,duration_seconds").gte("started_at", weekStart),
@@ -129,6 +138,9 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
         totalHoursSeconds: userEntries.reduce((sum, entry) => sum + (entry.duration_seconds ?? 0), 0),
         assignedProjectIds: userAssignments.map((assignment) => assignment.project_id),
         assignedProjects: userAssignments.map((assignment) => projectNames.get(assignment.project_id) ?? "Unknown"),
+        scheduleType: profile.schedule_type === "fixed" ? "fixed" : "flexible",
+        shiftStartTime: profile.shift_start_time,
+        shiftEndTime: profile.shift_end_time,
         workingDays: profile.working_days ?? [],
         lastDevice: latestDeviceByUser.get(profile.id) ?? null,
       };
@@ -178,6 +190,9 @@ export async function reactivateVa(va: ManagedVa): Promise<void> {
     id: va.id,
     isActive: true,
     password: "",
+    scheduleType: va.scheduleType,
+    shiftEndTime: va.shiftEndTime ?? "17:00",
+    shiftStartTime: va.shiftStartTime ?? "09:00",
     workingDays: va.workingDays,
   });
 }

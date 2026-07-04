@@ -54,7 +54,7 @@ export default function DashboardHome() {
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [timezone, setTimezone] = useState("Asia/Karachi");
   const [dashboardSettings, setDashboardSettings] = useState<AppSettings>(defaultSettings);
-  const [rangeMode, setRangeMode] = useState<OverviewRangeMode>("today");
+  const [rangeMode, setRangeMode] = useState<OverviewRangeMode>("last24h");
   const [customStartDate, setCustomStartDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [customEndDate, setCustomEndDate] = useState(todayDateInputValue("Asia/Karachi"));
   const [selectedScreenshot, setSelectedScreenshot] = useState<OverviewScreenshot | null>(null);
@@ -192,8 +192,8 @@ export default function DashboardHome() {
           </div>
           <div className="topbar-actions">
             <Select aria-label="Date range" onChange={(event) => setRangeMode(event.target.value as OverviewRangeMode)} value={rangeMode}>
-              <option value="today">Today</option>
               <option value="last24h">Last 24 Hours</option>
+              <option value="today">Today</option>
               <option value="yesterday">Yesterday</option>
               <option value="week">This Week</option>
               <option value="month">This Month</option>
@@ -439,6 +439,7 @@ function scheduleLabel(status: DashboardRow["scheduleStatus"]) {
   if (status === "late") return "Late";
   if (status === "no_show") return "No Show";
   if (status === "day_off") return "Day Off";
+  if (status === "flexible") return "Flexible";
   return "Not Set";
 }
 

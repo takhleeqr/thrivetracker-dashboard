@@ -197,9 +197,6 @@ export default function SettingsPage() {
                 value={settings.low_activity_minimum_minutes}
               />
             </SettingField>
-            <SettingField label="Late start time">
-              <Input onChange={(event) => updateSetting("late_start_time", event.target.value)} type="time" value={settings.late_start_time} />
-            </SettingField>
             <div className="settings-note">
               <Settings2 size={18} />
               <p>Low activity alerts fire when activity stays below the threshold for the selected number of consecutive minutes.</p>
@@ -211,13 +208,7 @@ export default function SettingsPage() {
           </Card>
 
           <Card className="detail-card settings-card">
-            <SectionTitle title="Schedule" />
-            <SettingField label="Work start time">
-              <Input onChange={(event) => updateSetting("work_start_time", event.target.value)} type="time" value={settings.work_start_time} />
-            </SettingField>
-            <SettingField label="Work end time">
-              <Input onChange={(event) => updateSetting("work_end_time", event.target.value)} type="time" value={settings.work_end_time} />
-            </SettingField>
+            <SectionTitle title="Company" />
             <SettingField label="Timezone">
               <Select onChange={(event) => updateSetting("timezone", event.target.value)} value={settings.timezone}>
                 {timezones.map((timezone) => (
@@ -227,6 +218,10 @@ export default function SettingsPage() {
                 ))}
               </Select>
             </SettingField>
+            <div className="settings-note">
+              <Settings2 size={18} />
+              <p>Fixed shifts are now assigned on each VA profile from the Team page. Flexible VAs will not be marked late.</p>
+            </div>
           </Card>
 
           <Card className="detail-card settings-card">
