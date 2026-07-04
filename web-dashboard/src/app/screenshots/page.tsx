@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { Camera, ChevronLeft, ChevronRight, Download, Filter, RefreshCw, Trash2, X } from "lucide-react";
+import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input, ModalFrame, Select } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatPercent } from "@/lib/format";
@@ -29,6 +30,7 @@ const navItems = [
 
 export default function ScreenshotsPage() {
   const router = useRouter();
+  const brandName = useBrandName();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [vas, setVas] = useState<ScreenshotOption[]>([]);
   const [projects, setProjects] = useState<ScreenshotOption[]>([]);
@@ -173,7 +175,7 @@ export default function ScreenshotsPage() {
     <main className="dashboard-shell">
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Magik Tracker</p>
+          <p className="eyebrow">{brandName}</p>
           <h1>Operations Desk</h1>
         </div>
         <nav className="nav-list" aria-label="Dashboard sections">

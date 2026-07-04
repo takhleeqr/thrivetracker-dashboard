@@ -2,12 +2,14 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input } from "@/components/ui";
 import { loadAdminProfile } from "@/lib/dashboard-data";
 import { supabase } from "@/lib/supabase";
 
 export default function LoginPage() {
   const router = useRouter();
+  const brandName = useBrandName();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -39,7 +41,7 @@ export default function LoginPage() {
   return (
     <main className="auth-shell">
       <Card className="auth-card">
-        <p className="eyebrow">Magik Tracker</p>
+        <p className="eyebrow">{brandName}</p>
         <h1>Admin Sign In</h1>
         <form onSubmit={handleSubmit}>
           <label>

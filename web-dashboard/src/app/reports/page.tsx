@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { Download, FileSpreadsheet, RefreshCw } from "lucide-react";
+import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input, Select, Table, Tabs } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
@@ -46,6 +47,7 @@ const emptyReports: ReportsData = {
 
 export default function ReportsPage() {
   const router = useRouter();
+  const brandName = useBrandName();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [reports, setReports] = useState<ReportsData>(emptyReports);
   const [vas, setVas] = useState<ReportOption[]>([]);
@@ -123,7 +125,7 @@ export default function ReportsPage() {
     <main className="dashboard-shell">
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Magik Tracker</p>
+          <p className="eyebrow">{brandName}</p>
           <h1>Operations Desk</h1>
         </div>
         <nav className="nav-list" aria-label="Dashboard sections">

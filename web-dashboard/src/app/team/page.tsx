@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { Edit3, MonitorCheck, Plus, RefreshCw, RotateCcw, Trash2, UsersRound, type LucideIcon } from "lucide-react";
+import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input, ModalFrame, Table, Tabs } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { formatHours } from "@/lib/format";
@@ -44,6 +45,7 @@ const workingDayOptions = [
 
 export default function TeamPage() {
   const router = useRouter();
+  const brandName = useBrandName();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [team, setTeam] = useState<ManagedVa[]>([]);
   const [projects, setProjects] = useState<TeamProjectOption[]>([]);
@@ -147,7 +149,7 @@ export default function TeamPage() {
     <main className="dashboard-shell">
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Magik Tracker</p>
+          <p className="eyebrow">{brandName}</p>
           <h1>Operations Desk</h1>
         </div>
         <nav className="nav-list" aria-label="Dashboard sections">

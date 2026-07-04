@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { RefreshCw, Save, Settings2 } from "lucide-react";
+import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input, Select } from "@/components/ui";
 import { loadAdminProfile, type Profile } from "@/lib/dashboard-data";
 import { defaultSettings, loadSettings, saveSettings, type AppSettings } from "@/lib/settings-data";
@@ -24,6 +25,7 @@ const timezones = supportedTimezones();
 
 export default function SettingsPage() {
   const router = useRouter();
+  const brandName = useBrandName();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [isLoading, setIsLoading] = useState(true);
@@ -97,7 +99,7 @@ export default function SettingsPage() {
     <main className="dashboard-shell">
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Magik Tracker</p>
+          <p className="eyebrow">{brandName}</p>
           <h1>Operations Desk</h1>
         </div>
         <nav className="nav-list" aria-label="Dashboard sections">

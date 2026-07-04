@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Activity, AlertTriangle, CalendarDays, Clock3, DollarSign, Download, MonitorCheck, RefreshCw, UsersRound, X } from "lucide-react";
+import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input, ModalFrame, Select, Table, Tabs } from "@/components/ui";
 import type { DashboardAlert, DashboardRow, DashboardSummary, Profile } from "@/lib/dashboard-data";
 import { closeStaleTimeEntries, loadAdminProfile, loadDashboardSummary } from "@/lib/dashboard-data";
@@ -42,6 +43,7 @@ type OverviewScreenshot = {
 
 export default function DashboardHome() {
   const router = useRouter();
+  const brandName = useBrandName();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
   const [statusFilter, setStatusFilter] = useState<"active" | "all" | "working" | "idle" | "on_break" | "stopped" | "offline" | "low" | "attention">("active");
@@ -166,7 +168,7 @@ export default function DashboardHome() {
     <main className="dashboard-shell">
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">Magik Tracker</p>
+          <p className="eyebrow">{brandName}</p>
           <h1>Operations Desk</h1>
         </div>
         <nav className="nav-list" aria-label="Dashboard sections">
