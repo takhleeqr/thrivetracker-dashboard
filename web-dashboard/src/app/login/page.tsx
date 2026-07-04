@@ -39,7 +39,7 @@ export default function LoginPage() {
   return (
     <main className="auth-shell">
       <Card className="auth-card">
-        <p className="eyebrow">ThriveTracker</p>
+        <p className="eyebrow">Magik Tracker</p>
         <h1>Admin Sign In</h1>
         <form onSubmit={handleSubmit}>
           <label>

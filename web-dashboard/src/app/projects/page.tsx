@@ -127,7 +127,7 @@ export default function ProjectsPage() {
     <main className="dashboard-shell">
       <aside className="sidebar">
         <div>
-          <p className="eyebrow">ThriveTracker</p>
+          <p className="eyebrow">Magik Tracker</p>
           <h1>Operations Desk</h1>
         </div>
         <nav className="nav-list" aria-label="Dashboard sections">
