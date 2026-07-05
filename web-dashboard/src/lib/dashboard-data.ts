@@ -1059,7 +1059,9 @@ function toTimelineSegment(
     ? new Date(entry.stopped_at).getTime()
     : resolvedOpenEntryEndTime(Date.now(), lastSeenAt, status, connectivityGraceMinutes);
   const displayStartTime = Math.max(new Date(entry.started_at).getTime(), rangeStart);
-  const displayEndTime = Math.min(rawEndTime, rangeEnd);
+  // Never let a rendered segment end before it begins, even when stale heartbeat
+  // data makes an open session's derived cutoff earlier than its recorded start.
+  const displayEndTime = Math.max(displayStartTime, Math.min(rawEndTime, rangeEnd));
   const endAt = new Date(displayEndTime).toISOString();
   const durationSeconds = Math.max(0, Math.floor((displayEndTime - displayStartTime) / 1000));
 
