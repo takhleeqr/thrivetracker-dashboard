@@ -784,17 +784,26 @@ function productivityScore(activityPercent: number | null): number {
 }
 
 function timeEntryMetrics(entry: TimeEntry, logs: ActivityLog[], screenshots: Screenshot[]) {
-  const entryLogs = logs.filter((log) => log.time_entry_id === entry.id);
+  const entryLogs = logs.filter((log) => log.time_entry_id === entry.id && isWithinEntryBounds(log.timestamp, entry));
   const averageActivityPercent = averageActivity(entryLogs);
 
   return {
     averageActivityPercent,
     idleMinutes: entryLogs.filter((log) => Number(log.activity_percent ?? 0) === 0).length,
     productivityScore: productivityScore(averageActivityPercent),
-    screenshotsTaken: screenshots.filter((screenshot) => screenshot.time_entry_id === entry.id).length,
+    screenshotsTaken: screenshots.filter((screenshot) => screenshot.time_entry_id === entry.id && isWithinEntryBounds(screenshot.captured_at, entry)).length,
     totalKeystrokes: entryLogs.reduce((sum, log) => sum + Number(log.keystrokes_count ?? 0), 0),
     totalMouseClicks: entryLogs.reduce((sum, log) => sum + Number(log.mouse_clicks_count ?? 0), 0),
   };
+}
+
+function isWithinEntryBounds(value: string, entry: TimeEntry) {
+  const timestamp = new Date(value).getTime();
+  const startedAt = new Date(entry.started_at).getTime();
+  const rawEndedAt = entry.stopped_at ? new Date(entry.stopped_at).getTime() : Number.POSITIVE_INFINITY;
+  const endedAt = Math.max(startedAt, rawEndedAt);
+
+  return timestamp >= startedAt && timestamp <= endedAt;
 }
 
 function latestScreenshotPerUser(screenshots: Array<Omit<Screenshot, "signedUrl">>) {

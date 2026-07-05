@@ -213,12 +213,32 @@ export default function VaDetailPage() {
   const isNonWorkSelection = Boolean(selectedActivity && !selectedSession);
   const wholeWindowPay = detail?.dailyPay.reduce((sum, day) => sum + day.earnings, 0) ?? 0;
   const scopedLogs = useMemo(
-    () => (selectedSession ? detail?.activityLogs.filter((log) => log.time_entry_id === selectedSession.id) ?? [] : isNonWorkSelection ? [] : detail?.activityLogs ?? []),
-    [detail?.activityLogs, isNonWorkSelection, selectedSession],
+    () => (
+      selectedSession
+        ? detail?.activityLogs.filter(
+            (log) =>
+              log.time_entry_id === selectedSession.id &&
+              isWithinSelectedWindow(log.timestamp, selectedActivity?.startedAt ?? selectedSession.started_at, selectedActivity?.endedAt ?? selectedSession.started_at),
+          ) ?? []
+        : isNonWorkSelection
+          ? []
+          : detail?.activityLogs ?? []
+    ),
+    [detail?.activityLogs, isNonWorkSelection, selectedActivity?.endedAt, selectedActivity?.startedAt, selectedSession],
   );
   const scopedScreenshots = useMemo(
-    () => (selectedSession ? detail?.screenshots.filter((shot) => shot.time_entry_id === selectedSession.id) ?? [] : isNonWorkSelection ? [] : detail?.screenshots ?? []),
-    [detail?.screenshots, isNonWorkSelection, selectedSession],
+    () => (
+      selectedSession
+        ? detail?.screenshots.filter(
+            (shot) =>
+              shot.time_entry_id === selectedSession.id &&
+              isWithinSelectedWindow(shot.captured_at, selectedActivity?.startedAt ?? selectedSession.started_at, selectedActivity?.endedAt ?? selectedSession.started_at),
+          ) ?? []
+        : isNonWorkSelection
+          ? []
+          : detail?.screenshots ?? []
+    ),
+    [detail?.screenshots, isNonWorkSelection, selectedActivity?.endedAt, selectedActivity?.startedAt, selectedSession],
   );
   const scopedAppUsage = useMemo(
     () => (selectedSession ? buildAppUsageFromLogs(scopedLogs) : isNonWorkSelection ? [] : detail?.appUsage ?? []),
@@ -1301,6 +1321,13 @@ function averageActivityFromLogs(logs: ActivityLog[]) {
 function productivityScore(activityPercent: number | null) {
   if (activityPercent === null) return 0;
   return Math.max(0, Math.min(100, Math.round(activityPercent)));
+}
+
+function isWithinSelectedWindow(value: string, startedAt: string, endedAt: string) {
+  const timestamp = new Date(value).getTime();
+  const start = new Date(startedAt).getTime();
+  const end = Math.max(start, new Date(endedAt).getTime());
+  return timestamp >= start && timestamp <= end;
 }
 
 function totalBreakSeconds(items: ActivityLogItem[]) {
