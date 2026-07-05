@@ -65,6 +65,7 @@ export default function VaDetailPage() {
   const [detail, setDetail] = useState<VaDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [refreshNotice, setRefreshNotice] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [rangeMode, setRangeMode] = useState<RangeMode>("last24h");
   const [timezone, setTimezone] = useState("Asia/Karachi");
@@ -121,18 +122,28 @@ export default function VaDetailPage() {
 
   useEffect(() => {
     if (!isReady) return;
-    const intervalId = window.setInterval(() => refreshData(selectedRange, timezone), 30_000);
+    const intervalId = window.setInterval(() => refreshData(selectedRange, timezone, { background: true }), 30_000);
     return () => window.clearInterval(intervalId);
   }, [connectivityGraceMinutes, isReady, selectedRange, timezone]);
 
-  async function refreshData(range = selectedRange, selectedTimezone = timezone) {
+  async function refreshData(
+    range = selectedRange,
+    selectedTimezone = timezone,
+    options: { background?: boolean } = {},
+  ) {
     try {
       setError("");
+      setRefreshNotice("");
       const nextDetail = await loadVaDetail(supabase, userId, range, selectedTimezone, { connectivity_grace_minutes: connectivityGraceMinutes });
       setDetail(nextDetail);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : "Could not load VA detail.");
+      const message = refreshError instanceof Error ? refreshError.message : "Could not load VA detail.";
+      if (options.background && detail) {
+        setRefreshNotice("Live refresh is delayed. Showing the last loaded VA detail.");
+        return;
+      }
+      setError(message);
     } finally {
       setIsLoading(false);
     }
@@ -292,6 +303,7 @@ export default function VaDetailPage() {
             {detail?.profile.email}
             {detail?.lastSeenAt ? `, last seen ${formatDateTimeFull(detail.lastSeenAt, timezone)}` : ""}
             {lastUpdatedAt ? `, updated ${formatTime(lastUpdatedAt, timezone)}` : ""}
+            {refreshNotice ? `, ${refreshNotice}` : ""}
           </p>
         </div>
         <div className="topbar-actions">
@@ -1213,14 +1225,16 @@ function buildGapItem(
     };
   }
 
-  if (previousEntry.stop_reason === "app_close" || previousEntry.stop_reason === "crash") {
+  if (previousEntry.stop_reason === "app_close" || previousEntry.stop_reason === "crash" || previousEntry.stop_reason === "connection_lost") {
     return {
       id: `gap-${index}-offline`,
       kind: "offline",
       title: "Offline",
       endedBy: "-",
-      explanation: previousEntry.stop_reason === "crash"
+      explanation: previousEntry.stop_reason === "connection_lost"
         ? "The previous work session was closed automatically after the connection was lost."
+        : previousEntry.stop_reason === "crash"
+          ? "The previous work session was closed automatically after the connection or app was lost."
         : "The previous work session ended because the desktop app was closed.",
       projectLabel: previousEntry.projectName,
       deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
@@ -1340,6 +1354,7 @@ function stopReasonShortLabel(entry: VaDetail["timeEntries"][number]) {
   if (entry.stop_reason === "manual") return "User stopped";
   if (entry.stop_reason === "idle") return "Inactivity";
   if (entry.stop_reason === "app_close") return "App closed";
+  if (entry.stop_reason === "connection_lost") return "Connection lost";
   if (entry.stop_reason === "crash") return "Connection lost";
   if (entry.stop_reason === "break") return "Break started";
   return "Stopped";
@@ -1351,6 +1366,7 @@ function stopReasonExplanation(entry: VaDetail["timeEntries"][number]) {
   if (entry.stop_reason === "manual") return "The VA stopped this work session manually.";
   if (entry.stop_reason === "idle") return "This work session ended automatically after no keyboard or mouse activity was detected for the idle limit.";
   if (entry.stop_reason === "app_close") return "This work session ended because the desktop app was closed.";
+  if (entry.stop_reason === "connection_lost") return "This work session was closed automatically after the desktop agent lost contact with the server.";
   if (entry.stop_reason === "crash") return "This work session was closed automatically after the connection or app was lost.";
   if (entry.stop_reason === "break") return "This work session ended because the VA started a break.";
   return "This work session ended.";

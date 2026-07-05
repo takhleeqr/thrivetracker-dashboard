@@ -1113,7 +1113,7 @@ class MainWindow(ttk.Frame):
                 entry_id=entry.id,
                 stopped_at=stopped_at.isoformat(),
                 duration_seconds=duration_seconds,
-                reason="crash",
+                reason="connection_lost",
             )
             self.root.after(
                 0,
@@ -1130,7 +1130,7 @@ class MainWindow(ttk.Frame):
                     "entry_id": entry.id,
                     "stopped_at": stopped_at.isoformat(),
                     "duration_seconds": duration_seconds,
-                    "reason": "crash",
+                    "reason": "connection_lost",
                 },
             )
             self.root.after(
@@ -1727,7 +1727,7 @@ class MainWindow(ttk.Frame):
         duration_seconds = max(0, int((stopped_at - active_entry.started_at).total_seconds()))
         reason, notice = {
             "shutdown_pending": ("app_close", "Recovered a session that was stopping while the app was offline."),
-            "connectivity_pending_stop": ("crash", "Recovered a session that had already stopped after connection loss."),
+            "connectivity_pending_stop": ("connection_lost", "Recovered a session that had already stopped after connection loss."),
             "idle_pending_stop": ("idle", "Recovered a session that had already paused after idle."),
             "sleep_pending_stop": ("crash", "Recovered a session that had already stopped after the computer slept."),
         }[mode]

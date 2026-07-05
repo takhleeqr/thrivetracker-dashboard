@@ -32,7 +32,7 @@ export type TimeEntry = {
   duration_seconds: number | null;
   is_manual?: boolean;
   manual_note?: string | null;
-  stop_reason: "manual" | "idle" | "app_close" | "crash" | "break" | null;
+  stop_reason: "manual" | "idle" | "app_close" | "crash" | "break" | "connection_lost" | null;
   device_id?: string | null;
   device_hostname?: string | null;
   device_os_username?: string | null;
@@ -164,6 +164,7 @@ export type DashboardAlert = {
     | "stale_heartbeat"
     | "missing_heartbeat"
     | "crash_closed"
+    | "connection_loss_resumes"
     | "late_start"
     | "no_show"
     | "screenshot_sync"
@@ -215,6 +216,7 @@ const RECENT_ACTIVITY_MINUTES = 10;
 const ONLINE_HEARTBEAT_MINUTES = 10;
 const RECENT_NON_WORKING_MINUTES = 60;
 const STALE_ENTRY_MINUTES = 10;
+const CONNECTION_LOSS_RESUME_ALERT_COUNT = 3;
 const SCREENSHOT_BUCKET = process.env.NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET ?? "screenshots";
 
 export async function loadAdminProfile(supabase: SupabaseClient): Promise<Profile | null> {
@@ -365,6 +367,8 @@ export async function loadDashboardSummary(
       now,
       queueAlertCount: Number(settings?.offline_queue_alert_count ?? "5"),
       queueAlertMinutes: Number(settings?.offline_queue_alert_minutes ?? "10"),
+      connectionLossResumeAlertCount: CONNECTION_LOSS_RESUME_ALERT_COUNT,
+      todayEntries: userTodayEntries,
       profile,
       restartLoopAlertCount: Number(settings?.restart_loop_alert_count ?? "3"),
       scheduleStatus,
@@ -871,24 +875,28 @@ function buildDashboardAlerts({
   now,
   queueAlertCount,
   queueAlertMinutes,
+  connectionLossResumeAlertCount,
   profile,
   restartLoopAlertCount,
   scheduleStatus,
   screenshotFailureAlertMinutes,
   status,
   threshold,
+  todayEntries,
   timezone,
 }: {
   activeEntry: TimeEntry | null;
   agentHealth: AgentHealthSnapshot | null;
   activityPercent: number | null;
   appLaunches: AgentAppLaunchEvent[];
+  todayEntries: TimeEntry[];
   latestEntry: TimeEntry | null;
   lowActivityMinimumMinutes: number;
   lowActivityStreakMinutes: number;
   now: number;
   queueAlertCount: number;
   queueAlertMinutes: number;
+  connectionLossResumeAlertCount: number;
   profile: Profile;
   restartLoopAlertCount: number;
   scheduleStatus: DashboardRow["scheduleStatus"];
@@ -961,7 +969,7 @@ function buildDashboardAlerts({
     });
   }
 
-  if (latestEntry?.stop_reason === "crash" && latestEntry.stopped_at && new Date(latestEntry.stopped_at).getTime() >= new Date(startOfTodayIso(timezone)).getTime()) {
+  if ((latestEntry?.stop_reason === "crash" || latestEntry?.stop_reason === "connection_lost") && latestEntry.stopped_at && new Date(latestEntry.stopped_at).getTime() >= new Date(startOfTodayIso(timezone)).getTime()) {
     alerts.push({
       id: `${profile.id}-crash-closed-${latestEntry.id}`,
       userId: profile.id,
@@ -969,7 +977,23 @@ function buildDashboardAlerts({
       severity: "critical",
       type: "crash_closed",
       title: "Session auto-closed",
-      message: `A stale open timer was closed as a crash at ${formatTime(latestEntry.stopped_at, timezone)}.`,
+      message:
+        latestEntry.stop_reason === "connection_lost"
+          ? `Tracking stopped after connection loss at ${formatTime(latestEntry.stopped_at, timezone)}.`
+          : `A stale open timer was closed as a crash at ${formatTime(latestEntry.stopped_at, timezone)}.`,
+    });
+  }
+
+  const connectionLossResumeCount = countConnectionLossResumesToday(todayEntries);
+  if (connectionLossResumeCount >= connectionLossResumeAlertCount) {
+    alerts.push({
+      id: `${profile.id}-connection-loss-resumes`,
+      userId: profile.id,
+      vaName: profile.full_name,
+      severity: "warning",
+      type: "connection_loss_resumes",
+      title: "Repeated connection-loss resumes",
+      message: `Tracking had to be resumed ${connectionLossResumeCount} time${connectionLossResumeCount === 1 ? "" : "s"} today after connection loss.`,
     });
   }
 
@@ -1034,6 +1058,20 @@ function launchesInCurrentShift(profile: Profile, appLaunches: AgentAppLaunchEve
   }
 
   return appLaunches.filter((event) => new Date(event.launched_at).getTime() >= windowStart).length;
+}
+
+function countConnectionLossResumesToday(entries: TimeEntry[]) {
+  const sorted = [...entries].sort((first, second) => new Date(first.started_at).getTime() - new Date(second.started_at).getTime());
+  let resumes = 0;
+
+  for (let index = 0; index < sorted.length - 1; index += 1) {
+    if (sorted[index]?.stop_reason !== "connection_lost") continue;
+    if (new Date(sorted[index + 1].started_at).getTime() > new Date(sorted[index].started_at).getTime()) {
+      resumes += 1;
+    }
+  }
+
+  return resumes;
 }
 
 async function addSignedScreenshotUrls(
@@ -1152,7 +1190,7 @@ function getStatus(
     return "stopped";
   }
 
-  if (latestEntry.stop_reason === "app_close" || latestEntry.stop_reason === "crash") {
+  if (latestEntry.stop_reason === "app_close" || latestEntry.stop_reason === "crash" || latestEntry.stop_reason === "connection_lost") {
     return "offline";
   }
 
