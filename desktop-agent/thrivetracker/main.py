@@ -77,6 +77,7 @@ class DesktopApp:
             self.hide_to_tray,
             self.notify_user,
             self.set_tray_state,
+            self.set_tray_resume_ready,
             self.logout_to_login,
         )
         self._start_tray()
@@ -118,6 +119,7 @@ class DesktopApp:
 
     def logout_to_login(self) -> None:
         self.main_window = None
+        self.set_tray_resume_ready(False)
         self.set_tray_state("stopped")
         self.show_login()
         self.show_window()
@@ -125,6 +127,10 @@ class DesktopApp:
     def set_tray_state(self, state: str) -> None:
         if self.tray:
             self.tray.set_state(state)
+
+    def set_tray_resume_ready(self, is_ready: bool) -> None:
+        if self.tray:
+            self.tray.set_resume_ready(is_ready)
 
     def notify_user(self, message: str, title: str | None = None) -> None:
         if self.tray:

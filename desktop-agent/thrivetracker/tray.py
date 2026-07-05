@@ -20,12 +20,16 @@ class TrayController:
         self.on_show_window = on_show_window
         self.on_quit = on_quit
         self.state = "stopped"
+        self.resume_ready = False
         self.icon = pystray.Icon(
             __app_name__,
             self._create_icon_image(self.state),
             __app_name__,
             pystray.Menu(
-                pystray.MenuItem(lambda _: "Stop Timer" if self.state == "tracking" else "Start Timer", self._toggle_tracking),
+                pystray.MenuItem(
+                    lambda _: "Stop Timer" if self.state == "tracking" else "Resume Tracking" if self.resume_ready else "Start Timer",
+                    self._toggle_tracking,
+                ),
                 pystray.MenuItem(lambda _: f"Status: {self._label_for_state()}", None, enabled=False),
                 pystray.MenuItem("Show Window", self._show_window),
                 pystray.MenuItem("Logout", self._logout),
@@ -46,8 +50,14 @@ class TrayController:
 
     def set_state(self, state: str) -> None:
         self.state = state
+        if state == "tracking":
+            self.resume_ready = False
         self.icon.icon = self._create_icon_image(state)
         self.icon.title = f"{__app_name__} - {self._label_for_state()}"
+        self.icon.update_menu()
+
+    def set_resume_ready(self, is_ready: bool) -> None:
+        self.resume_ready = is_ready
         self.icon.update_menu()
 
     def notify(self, message: str, title: str | None = None) -> None:

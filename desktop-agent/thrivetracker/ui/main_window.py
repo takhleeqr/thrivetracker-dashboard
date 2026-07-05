@@ -27,6 +27,7 @@ SESSION_STATE_PERSIST_SECONDS = 30
 QUEUE_SKIP_RETRY_LIMIT = 3
 SLEEP_GAP_SECONDS = 90
 SHIFT_REMINDER_CHECK_MS = 60 * 1000
+CONNECTIVITY_RESTORE_CHECK_MS = 30 * 1000
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class MainWindow(ttk.Frame):
         on_minimize: Callable[[], None],
         on_notify: Callable[[str, str | None], None] | None = None,
         on_tray_state_change: Callable[[str], None] | None = None,
+        on_tray_resume_change: Callable[[bool], None] | None = None,
         on_logout: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(root, padding=24)
@@ -61,6 +63,7 @@ class MainWindow(ttk.Frame):
         self.on_minimize = on_minimize
         self.on_notify = on_notify
         self.on_tray_state_change = on_tray_state_change
+        self.on_tray_resume_change = on_tray_resume_change
         self.on_logout = on_logout
         self.api = SupabaseApiService(
             config.supabase_url,
@@ -82,13 +85,17 @@ class MainWindow(ttk.Frame):
         self.activity_after_id: str | None = None
         self.idle_after_id: str | None = None
         self.queue_after_id: str | None = None
+        self.connectivity_restore_after_id: str | None = None
         self.settings_after_id: str | None = None
         self.shift_reminder_after_id: str | None = None
         self.heartbeat_after_id: str | None = None
         self.is_retrying_queue = False
+        self.is_checking_connectivity_restore = False
         self.last_activity_percent: float | None = None
         self.idle_resume_project_id: str | None = None
         self.break_resume_project_id: str | None = None
+        self.connectivity_resume_project_id: str | None = None
+        self.connectivity_resume_ready = False
         self.break_started_at: datetime | None = None
         self.idle_minutes: int = 0
         self.last_heartbeat_success_at: datetime | None = None
@@ -122,6 +129,15 @@ class MainWindow(ttk.Frame):
         self._sync_settings()
 
     def refresh_external_state(self) -> None:
+        self._set_tray_resume_ready(
+            bool(
+                self.connectivity_resume_project_id
+                and self.connectivity_resume_ready
+                and not self.active_entry
+                and not self.break_started_at
+                and not self.break_resume_project_id
+            )
+        )
         if self.active_entry:
             self._set_tray_state("tracking")
             return
@@ -130,7 +146,7 @@ class MainWindow(ttk.Frame):
             self._set_tray_state("paused")
             return
 
-        if self.status_text.get() in {"Connection lost", "Monitoring failed", "Sleep detected"}:
+        if self.connectivity_resume_project_id or self.status_text.get() in {"Connection lost", "Connection restored", "Monitoring failed", "Sleep detected"}:
             self._set_tray_state("attention")
             return
 
@@ -139,6 +155,10 @@ class MainWindow(ttk.Frame):
     def _set_tray_state(self, state: str) -> None:
         if self.on_tray_state_change:
             self.on_tray_state_change(state)
+
+    def _set_tray_resume_ready(self, is_ready: bool) -> None:
+        if self.on_tray_resume_change:
+            self.on_tray_resume_change(is_ready)
 
     def _notify_user(self, message: str, title: str | None = None) -> None:
         if self.on_notify:
@@ -315,6 +335,8 @@ class MainWindow(ttk.Frame):
             self._stop_timer("manual")
         elif self.break_resume_project_id:
             self._stop_break_shift()
+        elif self.connectivity_resume_project_id:
+            self._resume_after_connectivity_loss()
         else:
             self._start_timer()
 
@@ -373,6 +395,7 @@ class MainWindow(ttk.Frame):
         self._cancel_settings_sync()
         self._cancel_shift_reminder_check()
         self._cancel_heartbeat()
+        self._cancel_connectivity_restore_check()
         if self.queue_after_id:
             self.root.after_cancel(self.queue_after_id)
             self.queue_after_id = None
@@ -382,6 +405,7 @@ class MainWindow(ttk.Frame):
         self.break_started_at = None
         self.last_heartbeat_success_at = None
         self.last_runtime_tick_at = None
+        self._clear_connectivity_resume_state()
         self._clear_session_state()
         save_local_config(
             self.paths,
@@ -422,6 +446,7 @@ class MainWindow(ttk.Frame):
         self.idle_resume_project_id = None
         self.break_resume_project_id = None
         self.break_started_at = None
+        self._clear_connectivity_resume_state()
         self.last_activity_percent = None
         self.last_runtime_tick_at = datetime.now(timezone.utc)
         self.error_text.set(notice)
@@ -486,6 +511,7 @@ class MainWindow(ttk.Frame):
         self.break_started_at = None
         self.last_heartbeat_success_at = None
         self.last_runtime_tick_at = None
+        self._clear_connectivity_resume_state()
         self._cancel_screenshot_schedule()
         self._cancel_idle_check()
         self._cancel_heartbeat()
@@ -574,6 +600,7 @@ class MainWindow(ttk.Frame):
             self.today_total_seconds += duration_seconds
         self.active_entry = None
         self.break_started_at = datetime.now(timezone.utc)
+        self._clear_connectivity_resume_state()
         self.timer_text.set("On break: 00:00:00")
         self.status_text.set("On break")
         self.tracking_state_text.set("On break")
@@ -604,11 +631,30 @@ class MainWindow(ttk.Frame):
         self.break_button.configure(state="disabled")
         threading.Thread(target=self._start_timer_worker, args=(project,), daemon=True).start()
 
+    def _resume_after_connectivity_loss(self) -> None:
+        if not self.connectivity_resume_project_id:
+            return
+
+        if not self.connectivity_resume_ready:
+            self.error_text.set("Still waiting for the connection to come back. We will let you know when Resume is ready.")
+            return
+
+        project = next((item for item in self.projects if item.id == self.connectivity_resume_project_id), None)
+        if not project:
+            self._clear_connectivity_resume_state()
+            self.error_text.set("Could not resume. The previous project is no longer available.")
+            return
+
+        self.project_var.set(project.name)
+        self._set_busy(True, "Resuming...")
+        threading.Thread(target=self._start_timer_worker, args=(project,), daemon=True).start()
+
     def _stop_break_shift(self) -> None:
         self.break_resume_project_id = None
         self.break_started_at = None
         self.last_heartbeat_success_at = None
         self.last_runtime_tick_at = None
+        self._clear_connectivity_resume_state()
         self._cancel_heartbeat()
         self.timer_text.set("00:00:00")
         self.status_text.set("Stopped")
@@ -1069,7 +1115,14 @@ class MainWindow(ttk.Frame):
                 duration_seconds=duration_seconds,
                 reason="crash",
             )
-            self.root.after(0, lambda: self._finish_connectivity_pause(duration_seconds if updated else None, queued=False))
+            self.root.after(
+                0,
+                lambda: self._finish_connectivity_pause(
+                    duration_seconds if updated else None,
+                    queued=False,
+                    resume_project_id=entry.project_id,
+                ),
+            )
         except Exception:
             queued = self._try_enqueue(
                 "time_entry_stop",
@@ -1080,15 +1133,26 @@ class MainWindow(ttk.Frame):
                     "reason": "crash",
                 },
             )
-            self.root.after(0, lambda: ((self._update_queue_text() if queued else None), self._finish_connectivity_pause(duration_seconds, queued=True)))
+            self.root.after(
+                0,
+                lambda: (
+                    (self._update_queue_text() if queued else None),
+                    self._finish_connectivity_pause(
+                        duration_seconds,
+                        queued=True,
+                        resume_project_id=entry.project_id,
+                    ),
+                ),
+            )
 
-    def _finish_connectivity_pause(self, duration_seconds: int | None, queued: bool) -> None:
+    def _finish_connectivity_pause(self, duration_seconds: int | None, queued: bool, resume_project_id: str | None) -> None:
         if duration_seconds is not None:
             self.today_total_seconds += duration_seconds
         self.active_entry = None
         self.is_connectivity_stopping = False
         self.last_heartbeat_success_at = None
         self.last_runtime_tick_at = None
+        self._clear_connectivity_resume_state()
         self.timer_text.set("00:00:00")
         self.status_text.set("Connection lost")
         self.tracking_state_text.set("Reconnect, then press Start")
@@ -1103,6 +1167,10 @@ class MainWindow(ttk.Frame):
             self._clear_session_state()
             self._request_today_total_sync()
         else:
+            self.connectivity_resume_project_id = resume_project_id
+            project = next((item for item in self.projects if item.id == resume_project_id), None)
+            if project:
+                self.project_var.set(project.name)
             grace_label = format_duration(max(60, self.config.connectivity_grace_minutes * 60))
             if queued:
                 self.error_text.set(
@@ -1113,10 +1181,12 @@ class MainWindow(ttk.Frame):
                     f"The app stopped counting time after {grace_label} without server contact. Reconnect and press Start to continue."
                 )
                 self._clear_session_state()
+            self._schedule_connectivity_restore_check(delay_ms=1000)
             self._update_queue_text()
         self._update_today_text()
         self._set_busy(False)
         self._set_tray_state("attention")
+        self._set_tray_resume_ready(False)
         self._notify_user(
             "Your timer was stopped after losing connection. Reconnect and press Start when ready.",
             "ThriveTracker",
@@ -1131,6 +1201,92 @@ class MainWindow(ttk.Frame):
         if self.heartbeat_after_id:
             self.root.after_cancel(self.heartbeat_after_id)
             self.heartbeat_after_id = None
+
+    def _schedule_connectivity_restore_check(self, delay_ms: int = CONNECTIVITY_RESTORE_CHECK_MS) -> None:
+        if self.connectivity_restore_after_id:
+            self.root.after_cancel(self.connectivity_restore_after_id)
+        if not self.connectivity_resume_project_id or self.connectivity_resume_ready or self.active_entry or self.break_resume_project_id:
+            self.connectivity_restore_after_id = None
+            return
+        self.connectivity_restore_after_id = self.root.after(delay_ms, self._check_connectivity_restore)
+
+    def _cancel_connectivity_restore_check(self) -> None:
+        if self.connectivity_restore_after_id:
+            self.root.after_cancel(self.connectivity_restore_after_id)
+            self.connectivity_restore_after_id = None
+
+    def _check_connectivity_restore(self) -> None:
+        self.connectivity_restore_after_id = None
+        if (
+            self.is_checking_connectivity_restore
+            or not self.connectivity_resume_project_id
+            or self.connectivity_resume_ready
+            or self.active_entry
+            or self.break_resume_project_id
+        ):
+            return
+
+        self.is_checking_connectivity_restore = True
+        threading.Thread(target=self._check_connectivity_restore_worker, daemon=True).start()
+
+    def _check_connectivity_restore_worker(self) -> None:
+        restored = False
+        try:
+            snapshot = self.api.get_session_snapshot()
+            restored = snapshot.active_entry is None
+        except Exception:
+            restored = False
+        self.root.after(0, lambda: self._finish_connectivity_restore_check(restored))
+
+    def _finish_connectivity_restore_check(self, restored: bool) -> None:
+        self.is_checking_connectivity_restore = False
+        if not self.connectivity_resume_project_id or self.active_entry or self.break_resume_project_id:
+            self._set_tray_resume_ready(False)
+            return
+
+        if not restored:
+            self._schedule_connectivity_restore_check()
+            return
+
+        self.connectivity_resume_ready = True
+        project = next((item for item in self.projects if item.id == self.connectivity_resume_project_id), None)
+        if not project:
+            self._clear_connectivity_resume_state()
+            self.error_text.set("Connection is back, but the previous project is no longer available.")
+            return
+
+        self.project_var.set(project.name)
+        self.status_text.set("Connection restored")
+        self.tracking_state_text.set("Resume when ready")
+        self.button_text.set("Resume")
+        self.error_text.set("Connection is back. Resume tracking when you are ready.")
+        self._set_tray_state("attention")
+        self._set_tray_resume_ready(True)
+        self._notify_user(
+            "Connection restored. Use Resume Tracking in the tray or open ThriveTracker to continue.",
+            "ThriveTracker",
+        )
+        if self._is_window_visible():
+            should_resume = messagebox.askyesno(
+                "Resume tracking?",
+                f"Connection is back. Resume tracking on {project.name} now?",
+                parent=self.root,
+            )
+            if should_resume:
+                self._resume_after_connectivity_loss()
+
+    def _is_window_visible(self) -> bool:
+        try:
+            return self.root.state() != "withdrawn"
+        except tk.TclError:
+            return False
+
+    def _clear_connectivity_resume_state(self) -> None:
+        self.connectivity_resume_project_id = None
+        self.connectivity_resume_ready = False
+        self.is_checking_connectivity_restore = False
+        self._cancel_connectivity_restore_check()
+        self._set_tray_resume_ready(False)
 
     def _schedule_queue_retry(self) -> None:
         if self.queue_after_id:
@@ -1209,6 +1365,8 @@ class MainWindow(ttk.Frame):
             self._mark_screenshot_upload_recovered()
         if replayed_any:
             self._request_today_total_sync()
+        if replayed_any and self.connectivity_resume_project_id and not self.connectivity_resume_ready:
+            self._schedule_connectivity_restore_check(delay_ms=1000)
         self._schedule_queue_retry()
 
     def _update_queue_text(self) -> None:
@@ -1598,6 +1756,9 @@ class MainWindow(ttk.Frame):
         elif self.break_resume_project_id:
             self.button_text.set("Stop")
             self.break_button_text.set("Resume")
+        elif self.connectivity_resume_project_id and self.connectivity_resume_ready:
+            self.button_text.set("Resume")
+            self.break_button_text.set("Take Break")
         else:
             self.button_text.set("Start")
             self.break_button_text.set("Take Break")
