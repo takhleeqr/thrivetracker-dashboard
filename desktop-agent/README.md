@@ -1,21 +1,18 @@
 # ThriveTracker Desktop Agent
 
-Windows desktop agent for VA time tracking.
+Windows desktop tracker for VAs.
 
-## Current Status
+## What It Does
 
-Chunk 3.1 scaffold is in place:
-
-- App entry point
-- Dependency list
-- Runtime directory setup
-- Local config loader
-- Logging setup
-- Light-theme tkinter login
-- Supabase Auth for VA users
-- Assigned project dropdown
-- Start/stop timer with Supabase time entries
-- Local screenshot capture while tracking
+- Signs VAs in with Supabase Auth.
+- Shows only the projects assigned to that VA.
+- Starts and stops tracked work sessions.
+- Captures screenshots and minute-level activity while tracking.
+- Queues failed sync work locally and retries it later.
+- Stops unreliable tracked time on idle, connection loss, sleep, activity-monitor failure, or app-close recovery.
+- Restores the last session safely after restart when recovery is valid.
+- Shows tray states for tracking, paused, stopped, and attention-needed cases.
+- Lets the VA log out from the main window or the tray menu.
 
 ## Run Locally
 
@@ -28,26 +25,31 @@ python -m venv .venv
 .\.venv\Scripts\python.exe agent.py
 ```
 
-For quick idle testing, temporarily set this in the project `.env`:
+For fast local idle testing, temporarily set this in the project `.env`:
 
 ```text
 IDLE_TIMEOUT_MINUTES=1
 ```
 
+## Reliability Notes
+
+- The agent writes a local SQLite replay queue for failed stop events, screenshots, and activity logs.
+- Screenshot retries are skipped after repeated dead-file failures so payroll-critical stop/activity items do not stay blocked behind them forever.
+- Automatic stop flows now persist enough local state to recover cleanly after a crash during idle pause, connection-loss stop, sleep stop, or app-close stop.
+- Heartbeats include health data so the dashboard can alert on screenshot failures, queue backlog, and restart loops.
+
 ## Runtime Files
 
-The app creates local user folders automatically:
+The app creates local user files automatically under `%APPDATA%\\ThriveTracker`:
 
 ```text
-%APPDATA%\ThriveTracker\config.json
-%APPDATA%\ThriveTracker\queue\
-%APPDATA%\ThriveTracker\logs\
-%APPDATA%\ThriveTracker\temp\
+config.json
+session-state.json
+instance.lock
+queue\offline_queue.sqlite3
+logs\
+temp\
 ```
-
-## Next Chunk
-
-Chunk 3.9 will add the offline SQLite queue for failed uploads.
 
 ## Build EXE
 
@@ -68,3 +70,9 @@ The output file will be:
 ```text
 desktop-agent\dist\ThriveTracker.exe
 ```
+
+## Before Shipping To VAs
+
+- Run the production verification checklist in `docs/production-verification-checklist.md`.
+- Test idle pause, restart recovery, connection-loss stop, and sleep detection with the actual `.exe`.
+- Confirm the tray `Logout` action returns the agent to the login screen and clears saved session state.

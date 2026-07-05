@@ -16,6 +16,13 @@ class QueueItem:
     payload: dict
     file_path: Path | None
     attempts: int
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class QueueSummary:
+    count: int
+    oldest_created_at: datetime | None
 
 
 class OfflineQueue:
@@ -44,7 +51,7 @@ class OfflineQueue:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                select id, operation_type, payload_json, file_path, attempts
+                select id, operation_type, payload_json, file_path, attempts, created_at
                 from queue_items
                 order by id asc
                 limit ?
@@ -59,6 +66,7 @@ class OfflineQueue:
                 payload=json.loads(row["payload_json"]),
                 file_path=Path(row["file_path"]) if row["file_path"] else None,
                 attempts=row["attempts"],
+                created_at=_parse_datetime(row["created_at"]) or datetime.now(timezone.utc),
             )
             for row in rows
         ]
@@ -68,7 +76,7 @@ class OfflineQueue:
             connection.execute("delete from queue_items where id = ?", (item_id,))
         LOGGER.info("Deleted queued operation id %s after successful replay", item_id)
 
-    def mark_failed(self, item_id: int, error_message: str) -> None:
+    def mark_failed(self, item_id: int, error_message: str) -> int:
         with self._connect() as connection:
             connection.execute(
                 """
@@ -80,12 +88,28 @@ class OfflineQueue:
                 """,
                 (error_message[:1000], datetime.now(timezone.utc).isoformat(), item_id),
             )
+            row = connection.execute("select attempts from queue_items where id = ?", (item_id,)).fetchone()
         LOGGER.warning("Queued operation id %s failed replay: %s", item_id, error_message)
+        return int(row["attempts"]) if row else 0
 
     def count(self) -> int:
         with self._connect() as connection:
             row = connection.execute("select count(*) as total from queue_items").fetchone()
             return int(row["total"])
+
+    def summary(self) -> QueueSummary:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                select count(*) as total, min(created_at) as oldest_created_at
+                from queue_items
+                """
+            ).fetchone()
+
+        return QueueSummary(
+            count=int(row["total"]) if row else 0,
+            oldest_created_at=_parse_datetime(row["oldest_created_at"]) if row and row["oldest_created_at"] else None,
+        )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path)
@@ -114,3 +138,14 @@ class OfflineQueue:
                 on queue_items (id asc)
                 """
             )
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

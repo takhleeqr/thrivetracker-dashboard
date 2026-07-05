@@ -131,12 +131,14 @@ export async function saveProject(supabase: SupabaseClient, input: ProjectFormIn
     throw new Error("Project was saved but no project id was returned.");
   }
 
-  await syncAssignments(supabase, projectId, input.assignedUserIds);
+  await syncAssignments(supabase, projectId, input.isActive ? input.assignedUserIds : []);
 }
 
 export async function deactivateProject(supabase: SupabaseClient, projectId: string): Promise<void> {
   const { error } = await supabase.from("projects").update({ is_active: false }).eq("id", projectId);
   if (error) throw error;
+
+  await syncAssignments(supabase, projectId, []);
 }
 
 async function syncAssignments(supabase: SupabaseClient, projectId: string, assignedUserIds: string[]): Promise<void> {

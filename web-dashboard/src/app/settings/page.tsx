@@ -155,12 +155,29 @@ export default function SettingsPage() {
                 value={settings.idle_timeout_minutes}
               />
             </SettingField>
+            <SettingField label="Connection-loss grace" suffix="minutes">
+              <Input
+                max="30"
+                min="1"
+                onChange={(event) => updateSetting("connectivity_grace_minutes", event.target.value)}
+                type="number"
+                value={settings.connectivity_grace_minutes}
+              />
+            </SettingField>
             <SettingField label="Max screenshots per day" suffix="per VA">
               <Input
                 min="1"
                 onChange={(event) => updateSetting("max_screenshots_per_day", event.target.value)}
                 type="number"
                 value={settings.max_screenshots_per_day}
+              />
+            </SettingField>
+            <SettingField label="Shift reminder delay" suffix="minutes">
+              <Input
+                min="1"
+                onChange={(event) => updateSetting("shift_start_reminder_delay_minutes", event.target.value)}
+                type="number"
+                value={settings.shift_start_reminder_delay_minutes}
               />
             </SettingField>
           </Card>
@@ -197,9 +214,49 @@ export default function SettingsPage() {
                 value={settings.low_activity_minimum_minutes}
               />
             </SettingField>
+            <SettingField label="Screenshot failure alert" suffix="minutes">
+              <Input
+                min="1"
+                onChange={(event) => updateSetting("screenshot_failure_alert_minutes", event.target.value)}
+                type="number"
+                value={settings.screenshot_failure_alert_minutes}
+              />
+            </SettingField>
+            <SettingField label="Queue backlog size" suffix="items">
+              <Input
+                min="1"
+                onChange={(event) => updateSetting("offline_queue_alert_count", event.target.value)}
+                type="number"
+                value={settings.offline_queue_alert_count}
+              />
+            </SettingField>
+            <SettingField label="Queue backlog age" suffix="minutes">
+              <Input
+                min="1"
+                onChange={(event) => updateSetting("offline_queue_alert_minutes", event.target.value)}
+                type="number"
+                value={settings.offline_queue_alert_minutes}
+              />
+            </SettingField>
+            <SettingField label="Restart loop alert" suffix="launches">
+              <Input
+                min="2"
+                onChange={(event) => updateSetting("restart_loop_alert_count", event.target.value)}
+                type="number"
+                value={settings.restart_loop_alert_count}
+              />
+            </SettingField>
             <div className="settings-note">
               <Settings2 size={18} />
               <p>Low activity alerts fire when activity stays below the threshold for the selected number of consecutive minutes.</p>
+            </div>
+            <div className="settings-note">
+              <Settings2 size={18} />
+              <p>Health alerts warn you when screenshot sync keeps failing, a VA's offline queue is not draining, or the app is relaunching repeatedly in one shift.</p>
+            </div>
+            <div className="settings-note">
+              <Settings2 size={18} />
+              <p>Connection-loss grace decides how long a brief internet dip can last before the desktop timer stops payable time automatically.</p>
             </div>
             <div className="settings-note">
               <Settings2 size={18} />

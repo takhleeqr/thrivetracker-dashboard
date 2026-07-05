@@ -386,7 +386,7 @@ function splitEntryByDate(entry: TimeEntryRow, timezone: string, range: { start:
 function entryEndMs(entry: TimeEntryRow) {
   if (entry.stopped_at) return new Date(entry.stopped_at).getTime();
   if (entry.duration_seconds) return new Date(entry.started_at).getTime() + entry.duration_seconds * 1000;
-  return new Date(entry.started_at).getTime();
+  return Date.now();
 }
 
 function cleanName(value: string): string {

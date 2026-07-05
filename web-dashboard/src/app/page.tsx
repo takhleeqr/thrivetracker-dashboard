@@ -7,7 +7,7 @@ import { Activity, AlertTriangle, CalendarDays, Clock3, DollarSign, Download, Mo
 import { useBrandName } from "@/components/brand-provider";
 import { Button, Card, Input, ModalFrame, Select, Table, Tabs } from "@/components/ui";
 import type { DashboardAlert, DashboardRow, DashboardSummary, Profile } from "@/lib/dashboard-data";
-import { closeStaleTimeEntries, loadAdminProfile, loadDashboardSummary } from "@/lib/dashboard-data";
+import { loadAdminProfile, loadDashboardSummary } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
 import { defaultSettings, loadSettings, type AppSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
@@ -46,7 +46,7 @@ export default function DashboardHome() {
   const brandName = useBrandName();
   const [admin, setAdmin] = useState<Profile | null>(null);
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
-  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "working" | "idle" | "on_break" | "stopped" | "offline" | "low" | "attention">("active");
+  const [statusFilter, setStatusFilter] = useState<"active" | "all" | "working" | "sync_delayed" | "idle" | "on_break" | "stopped" | "offline" | "low" | "attention">("active");
   const [projectFilter, setProjectFilter] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -111,7 +111,6 @@ export default function DashboardHome() {
   async function refreshData(selectedTimezone = timezone, selectedSettings = dashboardSettings, range = selectedRange) {
     try {
       setError("");
-      await closeStaleTimeEntries(supabase);
       const nextSummary = await loadDashboardSummary(supabase, selectedTimezone, selectedSettings, { range });
       setSummary(nextSummary);
       setLastUpdatedAt(new Date());
@@ -130,8 +129,9 @@ export default function DashboardHome() {
   const visibleRows = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
     return summary.rows.filter((row) => {
-      if (statusFilter === "active" && !["working", "on_break", "idle"].includes(row.status)) return false;
+      if (statusFilter === "active" && !["working", "sync_delayed", "on_break", "idle"].includes(row.status)) return false;
       if (statusFilter === "working" && row.status !== "working") return false;
+      if (statusFilter === "sync_delayed" && row.status !== "sync_delayed") return false;
       if (statusFilter === "idle" && row.status !== "idle") return false;
       if (statusFilter === "on_break" && row.status !== "on_break") return false;
       if (statusFilter === "stopped" && row.status !== "stopped") return false;
@@ -272,6 +272,7 @@ export default function DashboardHome() {
               <Select onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)} value={statusFilter}>
                 <option value="active">Active only</option>
                 <option value="working">Working</option>
+                <option value="sync_delayed">Sync Delayed</option>
                 <option value="idle">Idle</option>
                 <option value="on_break">On Break</option>
                 <option value="stopped">Stopped</option>
@@ -445,6 +446,7 @@ function scheduleLabel(status: DashboardRow["scheduleStatus"]) {
 
 function statusLabel(status: DashboardRow["status"]) {
   if (status === "working") return "Working";
+  if (status === "sync_delayed") return "Sync Delayed";
   if (status === "idle") return "Idle";
   if (status === "on_break") return "On Break";
   if (status === "stopped") return "Stopped";

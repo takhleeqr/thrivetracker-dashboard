@@ -232,7 +232,23 @@ export default function TeamPage() {
                         <small>{va.email}</small>
                       </span>
                     </span>
-                    <span>{va.assignedProjects.length ? va.assignedProjects.join(", ") : "Unassigned"}</span>
+                    <span>
+                      {va.assignedProjects.length ? (
+                        <span className="assignment-pill-list">
+                          {va.assignedProjects.map((project) => (
+                            <span
+                              className={`assignment-pill ${project.isActive ? "assignment-pill-active" : "assignment-pill-inactive"}`}
+                              key={`${va.id}-${project.id}`}
+                            >
+                              {project.name}
+                              {!project.isActive ? <small>inactive</small> : null}
+                            </span>
+                          ))}
+                        </span>
+                      ) : (
+                        "Unassigned"
+                      )}
+                    </span>
                     <span>${va.hourlyRate.toFixed(2)}/hr</span>
                     <span>{formatHours(va.totalHoursSeconds)}</span>
                     <span>{va.expectedHoursPerWeek ? `${va.expectedHoursPerWeek}h` : "-"}</span>
@@ -465,7 +481,7 @@ function VaEditor({
               </label>
             ))
           ) : (
-            <p className="subtle-line">No projects found yet.</p>
+            <p className="subtle-line">No active projects found yet.</p>
           )}
         </div>
 

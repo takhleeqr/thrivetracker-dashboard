@@ -1,19 +1,40 @@
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 import threading
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..activity_tracker import ActivitySnapshot, ActivityTracker
-from ..api_service import ApiError, Project, SupabaseApiService, TimeEntry
+from ..api_service import ApiError, Project, RangeTimeEntry, SessionSnapshot, SupabaseApiService, TimeEntry, VaSchedule
 from ..app_paths import AppPaths
 from ..device_identity import DeviceIdentity
 from ..auth_service import AuthenticatedUser
 from ..config import AppConfig, save_local_config
 from ..offline_queue import OfflineQueue, QueueItem
+from ..session_state import PersistedSessionState, SessionStateStore
 from ..screenshot_service import CapturedScreenshot, ScreenshotService
 from ..window_tracker import get_active_window_info
+
+
+SESSION_RECOVERY_GRACE_MINUTES = 5
+SESSION_STALE_CLOSE_MINUTES = 10
+HEARTBEAT_INTERVAL_MS = 60 * 1000
+HEARTBEAT_RETRY_INTERVAL_MS = 30 * 1000
+SESSION_STATE_PERSIST_SECONDS = 30
+QUEUE_SKIP_RETRY_LIMIT = 3
+SLEEP_GAP_SECONDS = 90
+SHIFT_REMINDER_CHECK_MS = 60 * 1000
+
+
+@dataclass(frozen=True)
+class StartupState:
+    restored_entry: TimeEntry | None = None
+    break_project_id: str | None = None
+    break_started_at: datetime | None = None
+    notice: str = ""
 
 
 class MainWindow(ttk.Frame):
@@ -27,6 +48,9 @@ class MainWindow(ttk.Frame):
         temp_dir,
         queue_dir,
         on_minimize: Callable[[], None],
+        on_notify: Callable[[str, str | None], None] | None = None,
+        on_tray_state_change: Callable[[str], None] | None = None,
+        on_logout: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(root, padding=24)
         self.root = root
@@ -35,6 +59,9 @@ class MainWindow(ttk.Frame):
         self.paths = paths
         self.device = device
         self.on_minimize = on_minimize
+        self.on_notify = on_notify
+        self.on_tray_state_change = on_tray_state_change
+        self.on_logout = on_logout
         self.api = SupabaseApiService(
             config.supabase_url,
             config.supabase_anon_key,
@@ -43,8 +70,10 @@ class MainWindow(ttk.Frame):
         )
         self.screenshots = ScreenshotService(temp_dir, config.screenshot_quality)
         self.offline_queue = OfflineQueue(queue_dir / "offline_queue.sqlite3")
+        self.session_state = SessionStateStore(paths.session_state_file)
 
         self.projects: list[Project] = []
+        self.va_schedule = VaSchedule(schedule_type="flexible", shift_start_time=None, shift_end_time=None, working_days=[])
         self.active_entry: TimeEntry | None = None
         self.today_total_seconds = 0
         self.screenshots_today = 0
@@ -54,6 +83,7 @@ class MainWindow(ttk.Frame):
         self.idle_after_id: str | None = None
         self.queue_after_id: str | None = None
         self.settings_after_id: str | None = None
+        self.shift_reminder_after_id: str | None = None
         self.heartbeat_after_id: str | None = None
         self.is_retrying_queue = False
         self.last_activity_percent: float | None = None
@@ -61,6 +91,15 @@ class MainWindow(ttk.Frame):
         self.break_resume_project_id: str | None = None
         self.break_started_at: datetime | None = None
         self.idle_minutes: int = 0
+        self.last_heartbeat_success_at: datetime | None = None
+        self.last_state_persisted_at: datetime | None = None
+        self.is_connectivity_stopping = False
+        self.last_runtime_tick_at: datetime | None = None
+        self.is_sleep_stopping = False
+        self.last_shift_reminder_key: str | None = None
+        self.screenshot_failure_started_at: datetime | None = None
+        self.screenshot_failure_count = 0
+        self.last_screenshot_uploaded_at: datetime | None = None
 
         self.project_var = tk.StringVar()
         self.timer_text = tk.StringVar(value="00:00:00")
@@ -81,6 +120,112 @@ class MainWindow(ttk.Frame):
         self._tick()
         self._schedule_queue_retry()
         self._sync_settings()
+
+    def refresh_external_state(self) -> None:
+        if self.active_entry:
+            self._set_tray_state("tracking")
+            return
+
+        if self.break_started_at or self.idle_resume_project_id:
+            self._set_tray_state("paused")
+            return
+
+        if self.status_text.get() in {"Connection lost", "Monitoring failed", "Sleep detected"}:
+            self._set_tray_state("attention")
+            return
+
+        self._set_tray_state("stopped")
+
+    def _set_tray_state(self, state: str) -> None:
+        if self.on_tray_state_change:
+            self.on_tray_state_change(state)
+
+    def _notify_user(self, message: str, title: str | None = None) -> None:
+        if self.on_notify:
+            self.on_notify(message, title)
+
+    def _mark_screenshot_upload_failure(self) -> None:
+        if not self.screenshot_failure_started_at:
+            self.screenshot_failure_started_at = datetime.now(timezone.utc)
+        self.screenshot_failure_count += 1
+
+    def _mark_screenshot_upload_recovered(self) -> None:
+        self.screenshot_failure_started_at = None
+        self.screenshot_failure_count = 0
+        self.last_screenshot_uploaded_at = datetime.now(timezone.utc)
+
+    def _health_payload(self) -> dict[str, str | int | None]:
+        queue_summary = self.offline_queue.summary()
+        return {
+            "hostname": self.device.hostname,
+            "queue_size": queue_summary.count,
+            "oldest_queue_item_at": queue_summary.oldest_created_at.isoformat() if queue_summary.oldest_created_at else None,
+            "screenshot_failure_started_at": self.screenshot_failure_started_at.isoformat() if self.screenshot_failure_started_at else None,
+            "screenshot_failure_count": self.screenshot_failure_count,
+            "last_screenshot_uploaded_at": self.last_screenshot_uploaded_at.isoformat() if self.last_screenshot_uploaded_at else None,
+        }
+
+    def _schedule_shift_reminder_check(self) -> None:
+        if self.shift_reminder_after_id:
+            self.root.after_cancel(self.shift_reminder_after_id)
+        self.shift_reminder_after_id = self.root.after(SHIFT_REMINDER_CHECK_MS, self._check_shift_start_reminder)
+
+    def _cancel_shift_reminder_check(self) -> None:
+        if self.shift_reminder_after_id:
+            self.root.after_cancel(self.shift_reminder_after_id)
+            self.shift_reminder_after_id = None
+
+    def _check_shift_start_reminder(self) -> None:
+        self.shift_reminder_after_id = None
+        try:
+            self._maybe_send_shift_start_reminder()
+        finally:
+            self._schedule_shift_reminder_check()
+
+    def _maybe_send_shift_start_reminder(self) -> None:
+        if self.active_entry or self.break_started_at or self.break_resume_project_id:
+            return
+
+        if self.today_total_seconds > 0:
+            return
+
+        if self.va_schedule.schedule_type != "fixed" or not self.va_schedule.shift_start_time or not self.va_schedule.working_days:
+            return
+
+        try:
+            local_zone = ZoneInfo(self.config.timezone)
+        except ZoneInfoNotFoundError:
+            local_zone = timezone.utc
+
+        now_local = datetime.now(local_zone)
+        weekday = now_local.strftime("%a").lower()
+        if weekday not in {day.lower()[:3] for day in self.va_schedule.working_days}:
+            return
+
+        reminder_key = now_local.strftime("%Y-%m-%d")
+        if self.last_shift_reminder_key == reminder_key:
+            return
+
+        if not _is_valid_time(self.va_schedule.shift_start_time):
+            return
+
+        shift_hour, shift_minute = [int(part) for part in self.va_schedule.shift_start_time.split(":", 1)]
+        reminder_at = now_local.replace(
+            hour=shift_hour,
+            minute=shift_minute,
+            second=0,
+            microsecond=0,
+        ) + timedelta(minutes=max(1, self.config.shift_start_reminder_delay_minutes))
+
+        if now_local < reminder_at:
+            return
+
+        self.last_shift_reminder_key = reminder_key
+        self._set_tray_state("attention")
+        self._notify_user(
+            "Your fixed shift has started and the timer is not running. Open ThriveTracker and press Start.",
+            "ThriveTracker",
+        )
 
     def _build(self) -> None:
         self.pack(fill="both", expand=True)
@@ -106,6 +251,8 @@ class MainWindow(ttk.Frame):
 
         footer = ttk.Frame(self)
         footer.pack(fill="x", side="bottom")
+        logout_button = ttk.Button(footer, text="Logout", command=self.request_logout, style="Link.TButton")
+        logout_button.pack(side="right", padx=(0, 12))
         minimize_button = ttk.Button(footer, text="Minimize", command=self.on_minimize)
         minimize_button.pack(side="right")
         ToolTip(minimize_button, "Minimize to Tray")
@@ -117,27 +264,51 @@ class MainWindow(ttk.Frame):
     def _load_initial_data_worker(self) -> None:
         try:
             self.api.register_device(self.device)
+            try:
+                self.api.record_app_launch(self.device.install_id, self.device.hostname)
+            except ApiError:
+                pass
             projects = self.api.get_assigned_projects()
-            total_seconds = self.api.get_today_total_seconds()
-            self.root.after(0, lambda: self._finish_initial_data(projects, total_seconds))
+            schedule = self.api.get_va_schedule()
+            persisted_state = self.session_state.load()
+            startup_state = self._reconcile_startup_state(self.api.get_session_snapshot(), persisted_state)
+            today_entries = self.api.get_time_entries_in_range(*self._today_range_iso())
+            self.root.after(0, lambda: self._finish_initial_data(projects, today_entries, startup_state, schedule))
         except Exception as error:
             message = str(error) if isinstance(error, ApiError) else "Could not load your projects."
             self.root.after(0, lambda: self._finish_error(message))
 
-    def _finish_initial_data(self, projects: list[Project], total_seconds: int) -> None:
+    def _finish_initial_data(
+        self,
+        projects: list[Project],
+        today_entries: list[RangeTimeEntry],
+        startup_state: StartupState,
+        schedule: VaSchedule,
+    ) -> None:
+        self.va_schedule = schedule
         self.projects = projects
-        self.today_total_seconds = total_seconds
         self.project_combo["values"] = [project.name for project in projects]
+        self._set_today_total_from_entries(today_entries, startup_state.restored_entry.id if startup_state.restored_entry else None)
 
         if projects:
             self.project_combo.current(0)
-            self.status_text.set("Stopped")
-            self._set_busy(False)
+            if startup_state.restored_entry:
+                self._restore_tracking_session(startup_state.restored_entry, startup_state.notice)
+            elif startup_state.break_project_id and startup_state.break_started_at:
+                self._restore_break_state(startup_state.break_project_id, startup_state.break_started_at, startup_state.notice)
+            else:
+                self.status_text.set("Stopped")
+                self._set_busy(False)
+                if startup_state.notice:
+                    self.error_text.set(startup_state.notice)
+                self._set_tray_state("stopped")
         else:
             self.status_text.set("No assigned projects")
             self.toggle_button.configure(state="disabled")
+            self._set_tray_state("stopped")
 
         self._update_today_text()
+        self._schedule_shift_reminder_check()
 
     def _toggle_timer(self) -> None:
         if self.active_entry:
@@ -152,6 +323,76 @@ class MainWindow(ttk.Frame):
 
     def is_tracking(self) -> bool:
         return self.active_entry is not None
+
+    def request_logout(self) -> None:
+        if self.active_entry:
+            should_logout = messagebox.askyesno(
+                "Logout?",
+                "Tracking is active. Stop the current session and log out?",
+                parent=self.root,
+            )
+            if not should_logout:
+                return
+
+            self._flush_pending_activity(self.active_entry.id)
+            self._set_busy(True, "Logging out...")
+            entry = self.active_entry
+            threading.Thread(target=self._logout_active_session_worker, args=(entry,), daemon=True).start()
+            return
+
+        self._finish_logout()
+
+    def _logout_active_session_worker(self, entry: TimeEntry) -> None:
+        stopped_at = datetime.now(timezone.utc)
+        duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
+        try:
+            self.api.update_time_entry_stop(
+                entry_id=entry.id,
+                stopped_at=stopped_at.isoformat(),
+                duration_seconds=duration_seconds,
+                reason="manual",
+            )
+        except Exception:
+            queued = self._try_enqueue(
+                "time_entry_stop",
+                {
+                    "entry_id": entry.id,
+                    "stopped_at": stopped_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "reason": "manual",
+                },
+            )
+            if queued:
+                self.root.after(0, self._update_queue_text)
+        finally:
+            self.root.after(0, self._finish_logout)
+
+    def _finish_logout(self) -> None:
+        self._cancel_screenshot_schedule()
+        self._cancel_idle_check()
+        self._cancel_settings_sync()
+        self._cancel_shift_reminder_check()
+        self._cancel_heartbeat()
+        if self.queue_after_id:
+            self.root.after_cancel(self.queue_after_id)
+            self.queue_after_id = None
+        self._stop_activity_tracking()
+        self.active_entry = None
+        self.break_resume_project_id = None
+        self.break_started_at = None
+        self.last_heartbeat_success_at = None
+        self.last_runtime_tick_at = None
+        self._clear_session_state()
+        save_local_config(
+            self.paths,
+            {
+                "supabase_url": self.config.supabase_url,
+                "storage_bucket": self.config.storage_bucket,
+            },
+        )
+        self._set_tray_state("stopped")
+        if self.on_logout:
+            self.on_logout()
 
     def _start_timer(self) -> None:
         project = self._selected_project()
@@ -171,13 +412,19 @@ class MainWindow(ttk.Frame):
             self.root.after(0, lambda: self._finish_error(message))
 
     def _finish_start(self, entry: TimeEntry) -> None:
+        self._activate_tracking_session(entry)
+
+    def _activate_tracking_session(self, entry: TimeEntry, notice: str = "") -> None:
         self.active_entry = entry
         active_project = next((project for project in self.projects if project.id == entry.project_id), None)
+        self.is_connectivity_stopping = False
+        self.is_sleep_stopping = False
         self.idle_resume_project_id = None
         self.break_resume_project_id = None
         self.break_started_at = None
         self.last_activity_percent = None
-        self.error_text.set("")
+        self.last_runtime_tick_at = datetime.now(timezone.utc)
+        self.error_text.set(notice)
         self.status_text.set("Working")
         self.tracking_state_text.set("Tracking in progress")
         self.screenshot_text.set("Screenshots: scheduled")
@@ -188,16 +435,23 @@ class MainWindow(ttk.Frame):
             self.project_var.set(active_project.name)
         self.project_combo.configure(state="disabled")
         self._set_busy(False)
-        self._start_activity_tracking()
+        if not self._start_activity_tracking():
+            self._set_busy(True, "Stopping...")
+            self.error_text.set("Activity monitoring failed. Tracking was stopped to avoid unreliable hours.")
+            threading.Thread(target=self._stop_timer_worker, args=(entry, "app_close"), daemon=True).start()
+            return
         self._schedule_next_screenshot()
         self._schedule_idle_check()
         self._send_heartbeat()
+        self._persist_session_state(force=True)
+        self._set_tray_state("tracking")
 
     def _stop_timer(self, reason: str) -> None:
         if not self.active_entry:
             return
 
         entry = self.active_entry
+        self._flush_pending_activity(entry.id)
         self._set_busy(True, "Stopping...")
         threading.Thread(target=self._stop_timer_worker, args=(entry, reason), daemon=True).start()
 
@@ -205,15 +459,15 @@ class MainWindow(ttk.Frame):
         stopped_at = datetime.now(timezone.utc)
         duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
         try:
-            self.api.update_time_entry_stop(
+            updated = self.api.update_time_entry_stop(
                 entry_id=entry.id,
                 stopped_at=stopped_at.isoformat(),
                 duration_seconds=duration_seconds,
                 reason=reason,
             )
-            self.root.after(0, lambda: self._finish_stop(duration_seconds))
+            self.root.after(0, lambda: self._finish_stop(duration_seconds if updated else None, reason))
         except Exception:
-            self.offline_queue.enqueue(
+            queued = self._try_enqueue(
                 "time_entry_stop",
                 {
                     "entry_id": entry.id,
@@ -222,28 +476,47 @@ class MainWindow(ttk.Frame):
                     "reason": reason,
                 },
             )
-            self.root.after(0, lambda: (self._update_queue_text(), self._finish_stop(duration_seconds)))
+            self.root.after(0, lambda: ((self._update_queue_text() if queued else None), self._finish_stop(duration_seconds, reason)))
 
-    def _finish_stop(self, duration_seconds: int) -> None:
-        self.today_total_seconds += duration_seconds
+    def _finish_stop(self, duration_seconds: int | None, reason: str) -> None:
+        if duration_seconds is not None:
+            self.today_total_seconds += duration_seconds
         self.active_entry = None
         self.break_resume_project_id = None
         self.break_started_at = None
+        self.last_heartbeat_success_at = None
+        self.last_runtime_tick_at = None
         self._cancel_screenshot_schedule()
         self._cancel_idle_check()
         self._cancel_heartbeat()
         self._stop_activity_tracking()
         self.timer_text.set("00:00:00")
-        self.status_text.set("Stopped")
-        self.tracking_state_text.set("Ready")
+        if reason == "app_close":
+            self.status_text.set("Monitoring failed")
+            self.tracking_state_text.set("Reopen or press Start")
+        else:
+            self.status_text.set("Stopped")
+            self.tracking_state_text.set("Ready")
         self.screenshot_text.set("Screenshots: stopped")
         self.activity_text.set("Activity: stopped")
         self.button_text.set("Start")
         self.break_button_text.set("Take Break")
         self.break_button.configure(state="disabled")
         self.project_combo.configure(state="readonly")
+        self._clear_session_state()
+        if duration_seconds is None:
+            self.error_text.set("The session had already been closed. Refreshed totals from the server.")
+            self._request_today_total_sync()
         self._update_today_text()
         self._set_busy(False)
+        if reason == "app_close":
+            self._set_tray_state("attention")
+            self._notify_user(
+                "Activity monitoring failed and the timer was stopped. Open ThriveTracker and press Start when ready.",
+                "ThriveTracker",
+            )
+        else:
+            self._set_tray_state("stopped")
 
     def _toggle_break(self) -> None:
         if self.active_entry:
@@ -256,6 +529,7 @@ class MainWindow(ttk.Frame):
             return
 
         self.break_resume_project_id = self.active_entry.project_id
+        self._flush_pending_activity(self.active_entry.id)
         self.status_text.set("On break")
         self.tracking_state_text.set("On break")
         self.screenshot_text.set("Screenshots: paused")
@@ -276,15 +550,15 @@ class MainWindow(ttk.Frame):
         stopped_at = datetime.now(timezone.utc)
         duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
         try:
-            self.api.update_time_entry_stop(
+            updated = self.api.update_time_entry_stop(
                 entry_id=entry.id,
                 stopped_at=stopped_at.isoformat(),
                 duration_seconds=duration_seconds,
                 reason="break",
             )
-            self.root.after(0, lambda: self._finish_break(duration_seconds))
+            self.root.after(0, lambda: self._finish_break(duration_seconds if updated else None))
         except Exception:
-            self.offline_queue.enqueue(
+            queued = self._try_enqueue(
                 "time_entry_stop",
                 {
                     "entry_id": entry.id,
@@ -293,10 +567,11 @@ class MainWindow(ttk.Frame):
                     "reason": "break",
                 },
             )
-            self.root.after(0, lambda: (self._update_queue_text(), self._finish_break(duration_seconds)))
+            self.root.after(0, lambda: ((self._update_queue_text() if queued else None), self._finish_break(duration_seconds)))
 
-    def _finish_break(self, duration_seconds: int) -> None:
-        self.today_total_seconds += duration_seconds
+    def _finish_break(self, duration_seconds: int | None) -> None:
+        if duration_seconds is not None:
+            self.today_total_seconds += duration_seconds
         self.active_entry = None
         self.break_started_at = datetime.now(timezone.utc)
         self.timer_text.set("On break: 00:00:00")
@@ -306,9 +581,14 @@ class MainWindow(ttk.Frame):
         self.break_button_text.set("Resume")
         self.break_button.configure(state="normal")
         self.project_combo.configure(state="disabled")
+        self._persist_session_state(force=True)
+        if duration_seconds is None:
+            self.error_text.set("The work session had already been closed before break started. Totals were refreshed.")
+            self._request_today_total_sync()
         self._update_today_text()
         self._set_busy(False)
         self._send_heartbeat()
+        self._set_tray_state("paused")
 
     def _resume_after_break(self) -> None:
         if not self.break_resume_project_id:
@@ -327,6 +607,8 @@ class MainWindow(ttk.Frame):
     def _stop_break_shift(self) -> None:
         self.break_resume_project_id = None
         self.break_started_at = None
+        self.last_heartbeat_success_at = None
+        self.last_runtime_tick_at = None
         self._cancel_heartbeat()
         self.timer_text.set("00:00:00")
         self.status_text.set("Stopped")
@@ -335,16 +617,28 @@ class MainWindow(ttk.Frame):
         self.break_button_text.set("Take Break")
         self.break_button.configure(state="disabled")
         self.project_combo.configure(state="readonly")
+        self._clear_session_state()
+        self._set_tray_state("stopped")
 
     def stop_for_app_close(self) -> None:
+        if self.active_entry:
+            self._flush_pending_activity(self.active_entry.id)
         self._cancel_screenshot_schedule()
         self._cancel_idle_check()
         self._cancel_settings_sync()
+        self._cancel_shift_reminder_check()
         self._cancel_heartbeat()
         self._stop_activity_tracking()
         if self.active_entry:
             stopped_at = datetime.now(timezone.utc)
             duration_seconds = max(0, int((stopped_at - self.active_entry.started_at).total_seconds()))
+            self.session_state.save_shutdown(
+                entry_id=self.active_entry.id,
+                project_id=self.active_entry.project_id,
+                started_at=self.active_entry.started_at,
+                shutdown_at=stopped_at,
+                last_heartbeat_at=self.last_heartbeat_success_at,
+            )
             try:
                 self.api.update_time_entry_stop(
                     entry_id=self.active_entry.id,
@@ -352,8 +646,9 @@ class MainWindow(ttk.Frame):
                     duration_seconds=duration_seconds,
                     reason="app_close",
                 )
+                self._clear_session_state()
             except ApiError:
-                self.offline_queue.enqueue(
+                self._try_enqueue(
                     "time_entry_stop",
                     {
                         "entry_id": self.active_entry.id,
@@ -362,6 +657,18 @@ class MainWindow(ttk.Frame):
                         "reason": "app_close",
                     },
                 )
+        elif self.break_resume_project_id and self.break_started_at:
+            self.session_state.save_break(
+                project_id=self.break_resume_project_id,
+                break_started_at=self.break_started_at,
+                last_runtime_at=datetime.now(timezone.utc),
+                last_heartbeat_at=self.last_heartbeat_success_at,
+            )
+        else:
+            persisted_state = self.session_state.load()
+            if persisted_state and self._is_pending_stop_mode(persisted_state.mode):
+                return
+            self._clear_session_state()
 
     def _schedule_next_screenshot(self) -> None:
         self._cancel_screenshot_schedule()
@@ -401,8 +708,9 @@ class MainWindow(ttk.Frame):
             return
 
         self.idle_resume_project_id = self.active_entry.project_id
-        self.status_text.set("Idle - paused")
-        self.tracking_state_text.set("Paused")
+        self._flush_pending_activity(self.active_entry.id)
+        self.status_text.set("Idle detected")
+        self.tracking_state_text.set("Stopping idle time")
         self.screenshot_text.set("Screenshots: paused")
         self.activity_text.set("Activity: paused")
         self.button_text.set("Start")
@@ -413,28 +721,70 @@ class MainWindow(ttk.Frame):
         self._stop_activity_tracking()
 
         entry = self.active_entry
-        self._set_busy(True, "Idle - pausing...")
+        self._set_busy(True)
         threading.Thread(target=self._idle_stop_worker, args=(entry,), daemon=True).start()
 
     def _idle_stop_worker(self, entry: TimeEntry) -> None:
+        stopped_at = datetime.now(timezone.utc)
+        duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
+        self.session_state.save_idle_pending_stop(
+            entry_id=entry.id,
+            project_id=entry.project_id,
+            started_at=entry.started_at,
+            stopped_at=stopped_at,
+            last_heartbeat_at=self.last_heartbeat_success_at,
+        )
         try:
-            duration_seconds = self.api.stop_time_entry(entry, "idle")
-            self.root.after(0, lambda: self._finish_idle_pause(duration_seconds))
+            updated = self.api.update_time_entry_stop(
+                entry_id=entry.id,
+                stopped_at=stopped_at.isoformat(),
+                duration_seconds=duration_seconds,
+                reason="idle",
+            )
+            self.root.after(0, lambda: self._finish_idle_pause(duration_seconds if updated else None, queued=False))
         except Exception:
-            self.root.after(0, lambda: self._finish_error("Could not pause after idle."))
+            queued = self._try_enqueue(
+                "time_entry_stop",
+                {
+                    "entry_id": entry.id,
+                    "stopped_at": stopped_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "reason": "idle",
+                },
+            )
+            self.root.after(0, lambda: (self._update_queue_text(), self._finish_idle_pause(duration_seconds, queued=True)))
 
-    def _finish_idle_pause(self, duration_seconds: int) -> None:
-        self.today_total_seconds += duration_seconds
+    def _finish_idle_pause(self, duration_seconds: int | None, queued: bool) -> None:
+        if duration_seconds is not None:
+            self.today_total_seconds += duration_seconds
         self.active_entry = None
+        self.is_connectivity_stopping = False
+        self.last_heartbeat_success_at = None
+        self.last_runtime_tick_at = None
         self.timer_text.set("00:00:00")
-        self.status_text.set("Idle - paused")
-        self.tracking_state_text.set("Paused")
+        self.status_text.set("Idle detected")
+        self.tracking_state_text.set("Press Start when you return")
         self.button_text.set("Start")
         self.break_button.configure(state="disabled")
         self.project_combo.configure(state="readonly")
+        if duration_seconds is None:
+            self._clear_session_state()
+            self.error_text.set("The session had already been closed before idle pause finished. Totals were refreshed.")
+            self._request_today_total_sync()
+        elif queued:
+            self.error_text.set("Your timer was paused because you were idle. The stop will sync when the internet returns.")
+        else:
+            self._clear_session_state()
         self._update_today_text()
         self._set_busy(False)
-        self._prompt_resume_after_idle()
+        self._set_tray_state("paused")
+        if duration_seconds is not None and not queued:
+            self._prompt_resume_after_idle()
+        elif queued:
+            self._notify_user(
+                "Your timer was paused because you were idle. The stop will sync when the internet returns.",
+                "ThriveTracker",
+            )
 
     def _prompt_resume_after_idle(self) -> None:
         should_resume = messagebox.askyesno(
@@ -444,6 +794,12 @@ class MainWindow(ttk.Frame):
         )
         if should_resume:
             self._resume_after_idle()
+            return
+
+        self._notify_user(
+            "Your timer was paused because you were idle. Open ThriveTracker and press Start when you return.",
+            "ThriveTracker",
+        )
 
     def _resume_after_idle(self) -> None:
         if not self.idle_resume_project_id:
@@ -500,7 +856,7 @@ class MainWindow(ttk.Frame):
             screenshot.file_path.unlink(missing_ok=True)
             self.root.after(0, lambda: self._finish_screenshot_upload(screenshot))
         except Exception:
-            self.offline_queue.enqueue(
+            queued = self._try_enqueue(
                 "screenshot_upload",
                 {
                     "bucket_name": self.config.storage_bucket,
@@ -513,12 +869,19 @@ class MainWindow(ttk.Frame):
                 },
                 file_path=screenshot.file_path,
             )
-            self.root.after(0, lambda: (self._update_queue_text(), self._finish_screenshot_upload_error(screenshot)))
+            self.root.after(
+                0,
+                lambda: (
+                    self._update_queue_text() if queued else None,
+                    self._finish_screenshot_upload_error(screenshot),
+                ),
+            )
 
     def _finish_screenshot_upload(self, screenshot: CapturedScreenshot) -> None:
         if not self.active_entry:
             return
 
+        self._mark_screenshot_upload_recovered()
         self.screenshot_text.set(f"Screenshots: uploaded {screenshot.file_path.name}")
         self._schedule_next_screenshot()
 
@@ -526,6 +889,7 @@ class MainWindow(ttk.Frame):
         if not self.active_entry:
             return
 
+        self._mark_screenshot_upload_failure()
         self.screenshot_text.set(f"Screenshots: upload failed, kept {screenshot.file_path.name}")
         self._schedule_next_screenshot()
 
@@ -536,7 +900,7 @@ class MainWindow(ttk.Frame):
         self.screenshot_text.set("Screenshots: capture failed")
         self._schedule_next_screenshot()
 
-    def _start_activity_tracking(self) -> None:
+    def _start_activity_tracking(self) -> bool:
         self._stop_activity_tracking()
         self.activity_tracker = ActivityTracker()
 
@@ -545,10 +909,11 @@ class MainWindow(ttk.Frame):
         except Exception:
             self.activity_tracker = None
             self.activity_text.set("Activity: listener failed")
-            return
+            return False
 
         self.activity_text.set("Activity: recording")
         self._schedule_activity_log()
+        return True
 
     def _stop_activity_tracking(self) -> None:
         if self.activity_after_id:
@@ -563,6 +928,31 @@ class MainWindow(ttk.Frame):
         if self.activity_after_id:
             self.root.after_cancel(self.activity_after_id)
         self.activity_after_id = self.root.after(60 * 1000, self._capture_activity_log)
+
+    def _flush_pending_activity(self, time_entry_id: str) -> None:
+        if self.activity_after_id:
+            self.root.after_cancel(self.activity_after_id)
+            self.activity_after_id = None
+        if not self.activity_tracker:
+            return
+
+        snapshot = self.activity_tracker.snapshot_and_reset()
+        if (
+            snapshot.keystrokes_count == 0
+            and snapshot.mouse_clicks_count == 0
+            and not snapshot.mouse_moved
+            and snapshot.activity_percent <= 0
+        ):
+            return
+
+        window_info = get_active_window_info()
+        self.last_activity_percent = snapshot.activity_percent
+        self.activity_text.set(f"Activity: {snapshot.activity_percent:.0f}%")
+        threading.Thread(
+            target=self._upload_activity_worker,
+            args=(time_entry_id, snapshot, window_info.title, window_info.app_name),
+            daemon=True,
+        ).start()
 
     def _capture_activity_log(self) -> None:
         self.activity_after_id = None
@@ -602,8 +992,14 @@ class MainWindow(ttk.Frame):
         try:
             self.api.insert_activity_log_payload(payload)
         except Exception:
-            self.offline_queue.enqueue("activity_log", payload)
-            self.root.after(0, lambda: (self.activity_text.set("Activity: upload failed"), self._update_queue_text()))
+            queued = self._try_enqueue("activity_log", payload)
+            self.root.after(
+                0,
+                lambda: (
+                    self.activity_text.set("Activity: upload failed"),
+                    self._update_queue_text() if queued else self.error_text.set("Activity upload failed and could not be saved for retry."),
+                ),
+            )
 
     def _send_heartbeat(self) -> None:
         self._cancel_heartbeat()
@@ -613,17 +1009,123 @@ class MainWindow(ttk.Frame):
         threading.Thread(target=self._heartbeat_worker, daemon=True).start()
 
     def _heartbeat_worker(self) -> None:
+        delay_ms = HEARTBEAT_INTERVAL_MS
+        heartbeat_at = datetime.now(timezone.utc)
         try:
-            self.api.record_heartbeat(self.device.install_id)
+            self.api.record_heartbeat(self.device.install_id, self._health_payload())
+            self.last_heartbeat_success_at = heartbeat_at
+            self.root.after(0, lambda: self._persist_session_state(force=True))
         except Exception:
-            pass
+            if self.active_entry and not self.is_connectivity_stopping:
+                heartbeat_anchor = self.last_heartbeat_success_at or self.active_entry.started_at
+                grace_seconds = max(1, self.config.connectivity_grace_minutes) * 60
+                if (heartbeat_at - heartbeat_anchor).total_seconds() >= grace_seconds:
+                    self.root.after(0, self._pause_for_connectivity_loss)
+            delay_ms = HEARTBEAT_RETRY_INTERVAL_MS
         finally:
-            self.root.after(0, self._schedule_heartbeat)
+            self.root.after(0, lambda: self._schedule_heartbeat(delay_ms))
 
-    def _schedule_heartbeat(self) -> None:
+    def _pause_for_connectivity_loss(self) -> None:
+        if not self.active_entry or self.is_connectivity_stopping:
+            return
+
+        heartbeat_anchor = self.last_heartbeat_success_at or self.active_entry.started_at
+        grace_seconds = max(1, self.config.connectivity_grace_minutes) * 60
+        stopped_at = heartbeat_anchor + timedelta(seconds=grace_seconds)
+        if datetime.now(timezone.utc) < stopped_at:
+            return
+
+        self.is_connectivity_stopping = True
+        self._flush_pending_activity(self.active_entry.id)
+        self.status_text.set("Connection lost")
+        self.tracking_state_text.set("Stopping unreliable time")
+        self.screenshot_text.set("Screenshots: paused")
+        self.activity_text.set("Activity: paused")
+        self.button_text.set("Start")
+        self.break_button_text.set("Take Break")
+        self.break_button.configure(state="disabled")
+        self._cancel_screenshot_schedule()
+        self._cancel_idle_check()
+        self._cancel_heartbeat()
+        self._stop_activity_tracking()
+
+        entry = self.active_entry
+        self._set_busy(True, "Connection lost...")
+        threading.Thread(target=self._connectivity_stop_worker, args=(entry, stopped_at), daemon=True).start()
+
+    def _connectivity_stop_worker(self, entry: TimeEntry, stopped_at: datetime) -> None:
+        duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
+        self.session_state.save_connectivity_pending_stop(
+            entry_id=entry.id,
+            project_id=entry.project_id,
+            started_at=entry.started_at,
+            stopped_at=stopped_at,
+            last_heartbeat_at=self.last_heartbeat_success_at,
+        )
+        try:
+            updated = self.api.update_time_entry_stop(
+                entry_id=entry.id,
+                stopped_at=stopped_at.isoformat(),
+                duration_seconds=duration_seconds,
+                reason="crash",
+            )
+            self.root.after(0, lambda: self._finish_connectivity_pause(duration_seconds if updated else None, queued=False))
+        except Exception:
+            queued = self._try_enqueue(
+                "time_entry_stop",
+                {
+                    "entry_id": entry.id,
+                    "stopped_at": stopped_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "reason": "crash",
+                },
+            )
+            self.root.after(0, lambda: ((self._update_queue_text() if queued else None), self._finish_connectivity_pause(duration_seconds, queued=True)))
+
+    def _finish_connectivity_pause(self, duration_seconds: int | None, queued: bool) -> None:
+        if duration_seconds is not None:
+            self.today_total_seconds += duration_seconds
+        self.active_entry = None
+        self.is_connectivity_stopping = False
+        self.last_heartbeat_success_at = None
+        self.last_runtime_tick_at = None
+        self.timer_text.set("00:00:00")
+        self.status_text.set("Connection lost")
+        self.tracking_state_text.set("Reconnect, then press Start")
+        self.screenshot_text.set("Screenshots: stopped")
+        self.activity_text.set("Activity: stopped")
+        self.button_text.set("Start")
+        self.break_button_text.set("Take Break")
+        self.break_button.configure(state="disabled")
+        self.project_combo.configure(state="readonly")
+        if duration_seconds is None:
+            self.error_text.set("The session had already been closed before the connection-loss guard finished. Totals were refreshed.")
+            self._clear_session_state()
+            self._request_today_total_sync()
+        else:
+            grace_label = format_duration(max(60, self.config.connectivity_grace_minutes * 60))
+            if queued:
+                self.error_text.set(
+                    f"The app stopped counting time after {grace_label} without server contact. The stop will sync when the internet returns."
+                )
+            else:
+                self.error_text.set(
+                    f"The app stopped counting time after {grace_label} without server contact. Reconnect and press Start to continue."
+                )
+                self._clear_session_state()
+            self._update_queue_text()
+        self._update_today_text()
+        self._set_busy(False)
+        self._set_tray_state("attention")
+        self._notify_user(
+            "Your timer was stopped after losing connection. Reconnect and press Start when ready.",
+            "ThriveTracker",
+        )
+
+    def _schedule_heartbeat(self, delay_ms: int = HEARTBEAT_INTERVAL_MS) -> None:
         if not self.active_entry and not self.break_resume_project_id:
             return
-        self.heartbeat_after_id = self.root.after(2 * 60 * 1000, self._send_heartbeat)
+        self.heartbeat_after_id = self.root.after(delay_ms, self._send_heartbeat)
 
     def _cancel_heartbeat(self) -> None:
         if self.heartbeat_after_id:
@@ -645,18 +1147,29 @@ class MainWindow(ttk.Frame):
         threading.Thread(target=self._retry_queue_worker, daemon=True).start()
 
     def _retry_queue_worker(self) -> None:
+        replayed_any = False
+        replayed_screenshot = False
         try:
             for item in self.offline_queue.oldest(limit=10):
                 try:
-                    self._replay_queue_item(item)
+                    operation = self._replay_queue_item(item)
                     self.offline_queue.delete(item.id)
+                    replayed_any = True
+                    if operation == "screenshot_upload":
+                        replayed_screenshot = True
                 except Exception as error:
-                    self.offline_queue.mark_failed(item.id, str(error))
+                    attempts = self.offline_queue.mark_failed(item.id, str(error))
+                    if self._should_skip_failed_queue_item(item, attempts):
+                        self.offline_queue.delete(item.id)
+                        continue
                     break
         finally:
-            self.root.after(0, self._finish_queue_retry)
+            self.root.after(0, lambda: self._finish_queue_retry(replayed_any, replayed_screenshot))
 
-    def _replay_queue_item(self, item: QueueItem) -> None:
+    def _should_skip_failed_queue_item(self, item: QueueItem, attempts: int) -> bool:
+        return item.operation_type == "screenshot_upload" and attempts >= QUEUE_SKIP_RETRY_LIMIT
+
+    def _replay_queue_item(self, item: QueueItem) -> str:
         if item.operation_type == "time_entry_stop":
             self.api.update_time_entry_stop(
                 entry_id=item.payload["entry_id"],
@@ -664,15 +1177,15 @@ class MainWindow(ttk.Frame):
                 duration_seconds=int(item.payload["duration_seconds"]),
                 reason=item.payload["reason"],
             )
-            return
+            return item.operation_type
 
         if item.operation_type == "activity_log":
             self.api.insert_activity_log_payload(item.payload)
-            return
+            return item.operation_type
 
         if item.operation_type == "screenshot_upload":
             if not item.file_path or not item.file_path.exists():
-                return
+                raise RuntimeError("Queued screenshot file is missing from disk and cannot be replayed.")
 
             self.api.upload_screenshot_file(
                 bucket_name=item.payload["bucket_name"],
@@ -685,17 +1198,28 @@ class MainWindow(ttk.Frame):
                 activity_percent=item.payload.get("activity_percent"),
             )
             item.file_path.unlink(missing_ok=True)
-            return
+            return item.operation_type
 
         raise RuntimeError(f"Unknown queue operation: {item.operation_type}")
 
-    def _finish_queue_retry(self) -> None:
+    def _finish_queue_retry(self, replayed_any: bool, replayed_screenshot: bool) -> None:
         self.is_retrying_queue = False
         self._update_queue_text()
+        if replayed_screenshot:
+            self._mark_screenshot_upload_recovered()
+        if replayed_any:
+            self._request_today_total_sync()
         self._schedule_queue_retry()
 
     def _update_queue_text(self) -> None:
         self.queue_text.set(f"Queue: {self.offline_queue.count()} pending")
+
+    def _try_enqueue(self, operation_type: str, payload: dict, file_path=None) -> bool:
+        try:
+            self.offline_queue.enqueue(operation_type, payload, file_path=file_path)
+            return True
+        except Exception:
+            return False
 
     def _sync_settings(self) -> None:
         threading.Thread(target=self._sync_settings_worker, daemon=True).start()
@@ -703,14 +1227,20 @@ class MainWindow(ttk.Frame):
     def _sync_settings_worker(self) -> None:
         try:
             settings = self.api.get_settings()
-            self.root.after(0, lambda: self._finish_settings_sync(settings))
+            schedule = self.api.get_va_schedule()
+            self.root.after(0, lambda: self._finish_settings_sync(settings, schedule))
         except Exception:
             self.root.after(0, self._finish_settings_sync_error)
 
-    def _finish_settings_sync(self, settings: dict[str, str]) -> None:
+    def _finish_settings_sync(self, settings: dict[str, str], schedule: VaSchedule) -> None:
+        previous_timezone = self.config.timezone
         self.config = self.config.with_settings(settings)
+        self.va_schedule = schedule
         self.screenshots.quality = max(1, min(100, self.config.screenshot_quality))
         self.settings_text.set("Settings: synced")
+        if self.config.timezone != previous_timezone:
+            self._request_today_total_sync()
+        self._schedule_shift_reminder_check()
         self._schedule_settings_sync()
 
     def _finish_settings_sync_error(self) -> None:
@@ -727,6 +1257,182 @@ class MainWindow(ttk.Frame):
             self.root.after_cancel(self.settings_after_id)
             self.settings_after_id = None
 
+    def _today_range_bounds(self) -> tuple[datetime, datetime]:
+        try:
+            local_zone = ZoneInfo(self.config.timezone)
+        except ZoneInfoNotFoundError:
+            local_zone = timezone.utc
+
+        now_local = datetime.now(local_zone)
+        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        return start_local.astimezone(timezone.utc), now_local.astimezone(timezone.utc)
+
+    def _today_range_iso(self) -> tuple[str, str]:
+        start_at, end_at = self._today_range_bounds()
+        return start_at.isoformat(), end_at.isoformat()
+
+    def _set_today_total_from_entries(
+        self,
+        entries: list[RangeTimeEntry],
+        exclude_entry_id: str | None = None,
+    ) -> None:
+        range_start, range_end = self._today_range_bounds()
+        total_seconds = 0
+
+        for entry in entries:
+            if exclude_entry_id and entry.id == exclude_entry_id and entry.stopped_at is None:
+                continue
+            if entry.stopped_at is None:
+                continue
+
+            clamped_start = max(entry.started_at, range_start)
+            clamped_end = min(entry.stopped_at, range_end)
+            total_seconds += max(0, int((clamped_end - clamped_start).total_seconds()))
+
+        self.today_total_seconds = total_seconds
+
+    def _current_active_today_seconds(self) -> int:
+        if not self.active_entry:
+            return 0
+
+        range_start, range_end = self._today_range_bounds()
+        clamped_start = max(self.active_entry.started_at, range_start)
+        clamped_end = min(datetime.now(timezone.utc), range_end)
+        return max(0, int((clamped_end - clamped_start).total_seconds()))
+
+    def _request_today_total_sync(self) -> None:
+        threading.Thread(target=self._refresh_today_total_worker, daemon=True).start()
+
+    def _refresh_today_total_worker(self) -> None:
+        try:
+            entries = self.api.get_time_entries_in_range(*self._today_range_iso())
+            active_entry_id = self.active_entry.id if self.active_entry else None
+            self.root.after(0, lambda: self._finish_today_total_sync(entries, active_entry_id))
+        except Exception:
+            return
+
+    def _finish_today_total_sync(self, entries: list[RangeTimeEntry], active_entry_id: str | None) -> None:
+        self._set_today_total_from_entries(entries, active_entry_id)
+        self._update_today_text()
+
+    def _persist_session_state(self, force: bool = False) -> None:
+        now = datetime.now(timezone.utc)
+        if not force and self.last_state_persisted_at and (now - self.last_state_persisted_at).total_seconds() < SESSION_STATE_PERSIST_SECONDS:
+            return
+
+        if self.active_entry:
+            self.session_state.save_tracking(
+                entry_id=self.active_entry.id,
+                project_id=self.active_entry.project_id,
+                started_at=self.active_entry.started_at,
+                last_runtime_at=now,
+                last_heartbeat_at=self.last_heartbeat_success_at,
+            )
+            self.last_state_persisted_at = now
+            return
+
+        if self.break_resume_project_id and self.break_started_at:
+            self.session_state.save_break(
+                project_id=self.break_resume_project_id,
+                break_started_at=self.break_started_at,
+                last_runtime_at=now,
+                last_heartbeat_at=self.last_heartbeat_success_at,
+            )
+            self.last_state_persisted_at = now
+            return
+
+        self._clear_session_state()
+
+    def _clear_session_state(self) -> None:
+        self.session_state.clear()
+        self.last_state_persisted_at = None
+
+    def _restore_tracking_session(self, entry: TimeEntry, notice: str) -> None:
+        self._activate_tracking_session(entry, notice)
+        if notice:
+            self._notify_user("Recovered your last session after restart. Open ThriveTracker if you want to review it.", "ThriveTracker")
+
+    def _restore_break_state(self, project_id: str, break_started_at: datetime, notice: str) -> None:
+        self.active_entry = None
+        self.break_resume_project_id = project_id
+        self.break_started_at = break_started_at
+        self.last_heartbeat_success_at = datetime.now(timezone.utc)
+        project = next((item for item in self.projects if item.id == project_id), None)
+        if project:
+            self.project_var.set(project.name)
+
+        self.error_text.set(notice)
+        self.status_text.set("On break")
+        self.tracking_state_text.set("On break")
+        self.screenshot_text.set("Screenshots: paused")
+        self.activity_text.set("Activity: paused")
+        self.timer_text.set(f"On break: {format_duration(max(0, int((datetime.now(timezone.utc) - break_started_at).total_seconds())), show_seconds=True)}")
+        self.button_text.set("Stop")
+        self.break_button_text.set("Resume")
+        self.break_button.configure(state="normal")
+        self.project_combo.configure(state="disabled")
+        self._set_busy(False)
+        self._send_heartbeat()
+        self._persist_session_state(force=True)
+        self._set_tray_state("paused")
+
+    def _reconcile_startup_state(
+        self,
+        session_snapshot: SessionSnapshot,
+        persisted_state: PersistedSessionState | None,
+    ) -> StartupState:
+        now = datetime.now(timezone.utc)
+        restore_cutoff = now - timedelta(minutes=SESSION_RECOVERY_GRACE_MINUTES)
+        stale_cutoff = now - timedelta(minutes=SESSION_STALE_CLOSE_MINUTES)
+
+        active_entry = session_snapshot.active_entry
+        if active_entry:
+            if active_entry.device_fingerprint and active_entry.device_fingerprint != self.device.fingerprint_hash:
+                self._clear_session_state()
+                return StartupState(notice=f"Tracking is already running on {active_entry.device_hostname or 'another device'}.")
+
+            runtime_at = (
+                persisted_state.last_runtime_at
+                if persisted_state and persisted_state.entry_id == active_entry.id
+                else None
+            )
+
+            if persisted_state and runtime_at and self._is_pending_stop_mode(persisted_state.mode):
+                return StartupState(notice=self._recover_pending_stop_state(active_entry, persisted_state.mode, runtime_at))
+
+            if runtime_at and runtime_at >= restore_cutoff:
+                return StartupState(restored_entry=active_entry, notice="Recovered your active session after restart.")
+
+            if (runtime_at and runtime_at < stale_cutoff) or (session_snapshot.last_seen_at and session_snapshot.last_seen_at < stale_cutoff):
+                stopped_at = runtime_at or session_snapshot.last_seen_at or now
+                if stopped_at < active_entry.started_at:
+                    stopped_at = active_entry.started_at
+                duration_seconds = max(0, int((stopped_at - active_entry.started_at).total_seconds()))
+                self.api.update_time_entry_stop(
+                    entry_id=active_entry.id,
+                    stopped_at=stopped_at.isoformat(),
+                    duration_seconds=duration_seconds,
+                    reason="crash",
+                )
+                self._clear_session_state()
+                return StartupState(notice="Recovered a session that ended while the app was closed.")
+
+            if persisted_state:
+                return StartupState(restored_entry=active_entry, notice="Recovered your active session after restart.")
+
+            return StartupState(notice="An open session is still attached to this device. Press Start to reconnect if you are still working.")
+
+        if persisted_state and persisted_state.mode == "break" and persisted_state.project_id and persisted_state.last_runtime_at >= restore_cutoff:
+            return StartupState(
+                break_project_id=persisted_state.project_id,
+                break_started_at=persisted_state.break_started_at or persisted_state.last_runtime_at,
+                notice="Restored your break after restart.",
+            )
+
+        if persisted_state:
+            self._clear_session_state()
+        return StartupState()
+
     def _selected_project(self) -> Project | None:
         selected_name = self.project_var.get()
         for project in self.projects:
@@ -735,14 +1441,146 @@ class MainWindow(ttk.Frame):
         return None
 
     def _tick(self) -> None:
-        if self.active_entry:
-            elapsed = max(0, int((datetime.now(timezone.utc) - self.active_entry.started_at).total_seconds()))
-            self.timer_text.set(format_duration(elapsed, show_seconds=True))
-        elif self.break_started_at:
-            elapsed = max(0, int((datetime.now(timezone.utc) - self.break_started_at).total_seconds()))
-            self.timer_text.set(f"On break: {format_duration(elapsed, show_seconds=True)}")
+        now = datetime.now(timezone.utc)
+        if self._handle_runtime_gap(now):
+            self.root.after(1000, self._tick)
+            return
 
+        if self.active_entry:
+            elapsed = max(0, int((now - self.active_entry.started_at).total_seconds()))
+            self.timer_text.set(format_duration(elapsed, show_seconds=True))
+            self._persist_session_state()
+        elif self.break_started_at:
+            elapsed = max(0, int((now - self.break_started_at).total_seconds()))
+            self.timer_text.set(f"On break: {format_duration(elapsed, show_seconds=True)}")
+            self._persist_session_state()
+
+        if self.active_entry or self.break_started_at:
+            self._update_today_text()
+
+        self.last_runtime_tick_at = now
         self.root.after(1000, self._tick)
+
+    def _handle_runtime_gap(self, now: datetime) -> bool:
+        if not self.last_runtime_tick_at:
+            return False
+
+        gap_seconds = (now - self.last_runtime_tick_at).total_seconds()
+        if gap_seconds < SLEEP_GAP_SECONDS:
+            return False
+
+        if self.active_entry and not self.is_sleep_stopping:
+            self._pause_for_sleep_resume(self.last_runtime_tick_at)
+            self.last_runtime_tick_at = now
+            return True
+
+        self.last_runtime_tick_at = now
+        return False
+
+    def _pause_for_sleep_resume(self, stopped_at: datetime) -> None:
+        if not self.active_entry or self.is_sleep_stopping:
+            return
+
+        self.is_sleep_stopping = True
+        self._flush_pending_activity(self.active_entry.id)
+        self.status_text.set("Sleep detected")
+        self.tracking_state_text.set("Stopping unreliable time")
+        self.screenshot_text.set("Screenshots: paused")
+        self.activity_text.set("Activity: paused")
+        self.button_text.set("Start")
+        self.break_button_text.set("Take Break")
+        self.break_button.configure(state="disabled")
+        self._cancel_screenshot_schedule()
+        self._cancel_idle_check()
+        self._cancel_heartbeat()
+        self._stop_activity_tracking()
+
+        entry = self.active_entry
+        self._set_busy(True, "Sleep detected...")
+        threading.Thread(target=self._sleep_stop_worker, args=(entry, stopped_at), daemon=True).start()
+
+    def _sleep_stop_worker(self, entry: TimeEntry, stopped_at: datetime) -> None:
+        duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
+        self.session_state.save_sleep_pending_stop(
+            entry_id=entry.id,
+            project_id=entry.project_id,
+            started_at=entry.started_at,
+            stopped_at=stopped_at,
+            last_heartbeat_at=self.last_heartbeat_success_at,
+        )
+        try:
+            updated = self.api.update_time_entry_stop(
+                entry_id=entry.id,
+                stopped_at=stopped_at.isoformat(),
+                duration_seconds=duration_seconds,
+                reason="crash",
+            )
+            self.root.after(0, lambda: self._finish_sleep_pause(duration_seconds if updated else None, queued=False))
+        except Exception:
+            queued = self._try_enqueue(
+                "time_entry_stop",
+                {
+                    "entry_id": entry.id,
+                    "stopped_at": stopped_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "reason": "crash",
+                },
+            )
+            self.root.after(0, lambda: ((self._update_queue_text() if queued else None), self._finish_sleep_pause(duration_seconds, queued=True)))
+
+    def _finish_sleep_pause(self, duration_seconds: int | None, queued: bool) -> None:
+        if duration_seconds is not None:
+            self.today_total_seconds += duration_seconds
+        self.active_entry = None
+        self.is_sleep_stopping = False
+        self.last_heartbeat_success_at = None
+        self.last_runtime_tick_at = None
+        self.timer_text.set("00:00:00")
+        self.status_text.set("Sleep detected")
+        self.tracking_state_text.set("Press Start when ready")
+        self.screenshot_text.set("Screenshots: stopped")
+        self.activity_text.set("Activity: stopped")
+        self.button_text.set("Start")
+        self.break_button_text.set("Take Break")
+        self.break_button.configure(state="disabled")
+        self.project_combo.configure(state="readonly")
+        if duration_seconds is None:
+            self._clear_session_state()
+            self.error_text.set("The session had already been closed before sleep recovery finished. Totals were refreshed.")
+            self._request_today_total_sync()
+        elif queued:
+            self.error_text.set("Your timer was stopped because the computer slept. The stop will sync when the internet returns.")
+        else:
+            self._clear_session_state()
+            self.error_text.set("Your timer was stopped because the computer slept. Press Start when you are back to work.")
+        self._update_today_text()
+        self._set_busy(False)
+        self._set_tray_state("attention")
+        self._notify_user(
+            "Your timer was stopped because the computer slept. Open ThriveTracker and press Start when you are back.",
+            "ThriveTracker",
+        )
+
+    def _is_pending_stop_mode(self, mode: str) -> bool:
+        return mode in {"shutdown_pending", "connectivity_pending_stop", "idle_pending_stop", "sleep_pending_stop"}
+
+    def _recover_pending_stop_state(self, active_entry: TimeEntry, mode: str, runtime_at: datetime) -> str:
+        stopped_at = runtime_at if runtime_at >= active_entry.started_at else active_entry.started_at
+        duration_seconds = max(0, int((stopped_at - active_entry.started_at).total_seconds()))
+        reason, notice = {
+            "shutdown_pending": ("app_close", "Recovered a session that was stopping while the app was offline."),
+            "connectivity_pending_stop": ("crash", "Recovered a session that had already stopped after connection loss."),
+            "idle_pending_stop": ("idle", "Recovered a session that had already paused after idle."),
+            "sleep_pending_stop": ("crash", "Recovered a session that had already stopped after the computer slept."),
+        }[mode]
+        self.api.update_time_entry_stop(
+            entry_id=active_entry.id,
+            stopped_at=stopped_at.isoformat(),
+            duration_seconds=duration_seconds,
+            reason=reason,
+        )
+        self._clear_session_state()
+        return notice
 
     def _set_busy(self, is_busy: bool, status: str | None = None) -> None:
         if status:
@@ -763,9 +1601,10 @@ class MainWindow(ttk.Frame):
         else:
             self.button_text.set("Start")
             self.break_button_text.set("Take Break")
+        self.refresh_external_state()
 
     def _update_today_text(self) -> None:
-        self.today_text.set(f"Today: {format_duration(self.today_total_seconds)}")
+        self.today_text.set(f"Today: {format_duration(self.today_total_seconds + self._current_active_today_seconds())}")
 
     def _save_refreshed_session(self, user: AuthenticatedUser) -> None:
         if not user.remember_session:
@@ -792,6 +1631,10 @@ def format_duration(total_seconds: int, show_seconds: bool = False) -> str:
         return f"{hours:02}:{minutes:02}:{seconds:02}"
 
     return f"{hours}h {minutes:02}m"
+
+
+def _is_valid_time(value: str | None) -> bool:
+    return bool(value and len(value) == 5 and value[2] == ":" and value[:2].isdigit() and value[3:].isdigit())
 
 
 class ToolTip:

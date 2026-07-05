@@ -3,10 +3,10 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, type MouseEvent } from "react";
-import { Activity, ArrowLeft, Camera, Clock3, Download, Monitor, Plus, RefreshCw, Rows3, TimerReset, X, type LucideIcon } from "lucide-react";
+import { Activity, ArrowLeft, Camera, ChevronLeft, ChevronRight, Clock3, Download, Monitor, Plus, RefreshCw, Rows3, TimerReset, X, type LucideIcon } from "lucide-react";
 import { Button, Card, Input, ModalFrame, Select, Table, Tabs } from "@/components/ui";
 import type { ActivityLog, DetailDateRange, Screenshot, VaDetail } from "@/lib/dashboard-data";
-import { closeStaleTimeEntries, loadAdminProfile, loadVaDetail } from "@/lib/dashboard-data";
+import { loadAdminProfile, loadVaDetail } from "@/lib/dashboard-data";
 import { formatHours, formatPercent } from "@/lib/format";
 import { loadSettings } from "@/lib/settings-data";
 import { supabase } from "@/lib/supabase";
@@ -71,6 +71,7 @@ export default function VaDetailPage() {
   const [customStart, setCustomStart] = useState(todayDateInputValue("Asia/Karachi"));
   const [customEnd, setCustomEnd] = useState(todayDateInputValue("Asia/Karachi"));
   const [selectedScreenshot, setSelectedScreenshot] = useState<Screenshot | null>(null);
+  const [connectivityGraceMinutes, setConnectivityGraceMinutes] = useState("2");
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [manualForm, setManualForm] = useState<ManualEntryForm>(() => createManualEntryForm(todayDateInputValue("Asia/Karachi")));
@@ -100,6 +101,7 @@ export default function VaDetailPage() {
       const settings = await loadSettings(supabase);
       if (!isMounted) return;
       setTimezone(settings.timezone);
+      setConnectivityGraceMinutes(settings.connectivity_grace_minutes);
       setUnproductiveApps(parseUnproductiveApps(settings.app_categories_unproductive));
       setCustomStart(todayDateInputValue(settings.timezone));
       setCustomEnd(todayDateInputValue(settings.timezone));
@@ -115,19 +117,18 @@ export default function VaDetailPage() {
   useEffect(() => {
     if (!isReady) return;
     refreshData(selectedRange, timezone);
-  }, [isReady, selectedRange, timezone]);
+  }, [connectivityGraceMinutes, isReady, selectedRange, timezone]);
 
   useEffect(() => {
     if (!isReady) return;
     const intervalId = window.setInterval(() => refreshData(selectedRange, timezone), 30_000);
     return () => window.clearInterval(intervalId);
-  }, [isReady, selectedRange, timezone]);
+  }, [connectivityGraceMinutes, isReady, selectedRange, timezone]);
 
   async function refreshData(range = selectedRange, selectedTimezone = timezone) {
     try {
       setError("");
-      await closeStaleTimeEntries(supabase);
-      const nextDetail = await loadVaDetail(supabase, userId, range, selectedTimezone);
+      const nextDetail = await loadVaDetail(supabase, userId, range, selectedTimezone, { connectivity_grace_minutes: connectivityGraceMinutes });
       setDetail(nextDetail);
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
@@ -226,6 +227,14 @@ export default function VaDetailPage() {
   const screenshotGroups = useMemo(
     () => (selectedActivity ? [] : groupScreenshotsBySession(detail, timezone)),
     [detail, selectedActivity, timezone],
+  );
+  const visibleScreenshots = useMemo(
+    () => (selectedSession ? scopedScreenshots : selectedActivity ? [] : screenshotGroups.flatMap((group) => group.shots)),
+    [scopedScreenshots, screenshotGroups, selectedActivity, selectedSession],
+  );
+  const selectedScreenshotIndex = useMemo(
+    () => (selectedScreenshot ? visibleScreenshots.findIndex((shot) => shot.id === selectedScreenshot.id) : -1),
+    [selectedScreenshot, visibleScreenshots],
   );
   const scopedKeystrokes = isNonWorkSelection ? 0 : scopedLogs.reduce((sum, log) => sum + Number(log.keystrokes_count ?? 0), 0);
   const scopedClicks = isNonWorkSelection ? 0 : scopedLogs.reduce((sum, log) => sum + Number(log.mouse_clicks_count ?? 0), 0);
@@ -394,7 +403,17 @@ export default function VaDetailPage() {
               projects={detail.projectOptions}
             />
           ) : null}
-          {selectedScreenshot ? <ScreenshotLightbox screenshot={selectedScreenshot} onClose={() => setSelectedScreenshot(null)} timezone={timezone} /> : null}
+          {selectedScreenshot ? (
+            <ScreenshotLightbox
+              canGoNext={selectedScreenshotIndex >= 0 && selectedScreenshotIndex < visibleScreenshots.length - 1}
+              canGoPrevious={selectedScreenshotIndex > 0}
+              onClose={() => setSelectedScreenshot(null)}
+              onNext={() => setSelectedScreenshot(visibleScreenshots[selectedScreenshotIndex + 1] ?? null)}
+              onPrevious={() => setSelectedScreenshot(visibleScreenshots[selectedScreenshotIndex - 1] ?? null)}
+              screenshot={selectedScreenshot}
+              timezone={timezone}
+            />
+          ) : null}
         </>
       ) : null}
     </main>
@@ -971,10 +990,37 @@ function EmptySmall({ icon: Icon, title, text }: { icon: LucideIcon; title: stri
   );
 }
 
-function ScreenshotLightbox({ screenshot, onClose, timezone }: { screenshot: Screenshot; onClose: () => void; timezone: string }) {
+function ScreenshotLightbox({
+  screenshot,
+  onClose,
+  onNext,
+  onPrevious,
+  canGoNext,
+  canGoPrevious,
+  timezone,
+}: {
+  screenshot: Screenshot;
+  onClose: () => void;
+  onNext: () => void;
+  onPrevious: () => void;
+  canGoNext: boolean;
+  canGoPrevious: boolean;
+  timezone: string;
+}) {
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft" && canGoPrevious) onPrevious();
+      if (event.key === "ArrowRight" && canGoNext) onNext();
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [canGoNext, canGoPrevious, onClose, onNext, onPrevious]);
+
   return (
-    <div className="modal-backdrop screenshot-lightbox-backdrop">
-      <ModalFrame className="screenshot-lightbox">
+    <div className="modal-backdrop screenshot-lightbox-backdrop" onClick={onClose}>
+      <ModalFrame className="screenshot-lightbox" onClick={(event) => event.stopPropagation()}>
         <div className="section-heading">
           <div>
             <p className="eyebrow">Screenshot</p>
@@ -995,11 +1041,31 @@ function ScreenshotLightbox({ screenshot, onClose, timezone }: { screenshot: Scr
             </button>
           </div>
         </div>
-        {screenshot.signedUrl ? (
-          <img alt="Full screenshot" className="lightbox-image" src={screenshot.signedUrl} />
-        ) : (
-          <div className="screenshot-missing lightbox-missing">Signed URL unavailable</div>
-        )}
+        <div className="lightbox-stage" onClick={(event) => event.stopPropagation()}>
+          <button
+            aria-label="Previous screenshot"
+            className="lightbox-nav lightbox-nav-left"
+            disabled={!canGoPrevious}
+            onClick={onPrevious}
+            type="button"
+          >
+            <ChevronLeft size={20} />
+          </button>
+          {screenshot.signedUrl ? (
+            <img alt="Full screenshot" className="lightbox-image" src={screenshot.signedUrl} />
+          ) : (
+            <div className="screenshot-missing lightbox-missing">Signed URL unavailable</div>
+          )}
+          <button
+            aria-label="Next screenshot"
+            className="lightbox-nav lightbox-nav-right"
+            disabled={!canGoNext}
+            onClick={onNext}
+            type="button"
+          >
+            <ChevronRight size={20} />
+          </button>
+        </div>
       </ModalFrame>
     </div>
   );
@@ -1136,6 +1202,23 @@ function buildGapItem(
       explanation: previousEntry.stop_reason === "crash"
         ? "The previous work session was closed automatically after the connection was lost."
         : "The previous work session ended because the desktop app was closed.",
+      projectLabel: previousEntry.projectName,
+      deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
+      startedAt,
+      endedAt,
+      durationSeconds,
+      tone: "alert",
+      session: null,
+    };
+  }
+
+  if (!previousEntry.stopped_at) {
+    return {
+      id: `gap-${index}-offline-open`,
+      kind: "offline",
+      title: "Offline",
+      endedBy: "-",
+      explanation: "The timer is still open, but the desktop app stopped sending heartbeats. Any later work will appear after the desktop app reconnects and syncs.",
       projectLabel: previousEntry.projectName,
       deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,

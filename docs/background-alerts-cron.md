@@ -1,17 +1,19 @@
 # Background Alerts Cron Setup
 
-This makes Late, No Show, stale heartbeat, crash, and low-activity alerts update even when no manager has the dashboard open.
+This makes schedule, low-activity, stale-sync, screenshot-sync, queue-backlog, and restart-loop alerts update even when no manager has the dashboard open.
 
 ## What Was Added
 
 - `web-dashboard/src/app/api/alerts/recalculate/route.ts` recalculates alerts and stores them in `dashboard_alerts`.
 - `supabase/migrations/004_dashboard_alerts.sql` creates the persisted alerts table.
+- `supabase/migrations/013_agent_health_and_reminder_settings.sql` adds agent health tables and settings used by the newer health alerts.
 - `CRON_SECRET` protects the endpoint from public use.
 
 ## One-Time Setup
 
 1. In Supabase SQL Editor, run:
    - `supabase/migrations/004_dashboard_alerts.sql`
+   - `supabase/migrations/013_agent_health_and_reminder_settings.sql`
 2. In Vercel project settings, add these Production environment variables:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
@@ -62,7 +64,7 @@ Expected result:
 }
 ```
 
-`activeAlerts` can be more than `0` if someone is late, no-show, has low activity, or has a stale/crashed timer.
+`activeAlerts` can be more than `0` if someone is late, no-show, low activity, sync delayed, repeatedly crashing, failing screenshot uploads, or building a queue backlog.
 
 ## Notes
 

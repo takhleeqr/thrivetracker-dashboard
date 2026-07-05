@@ -135,7 +135,7 @@ export type DashboardRow = {
   userId: string;
   name: string;
   email: string;
-  status: "working" | "on_break" | "idle" | "stopped" | "offline" | "day_off";
+  status: "working" | "sync_delayed" | "on_break" | "idle" | "stopped" | "offline" | "day_off";
   statusDetail: string;
   scheduleStatus: "on_time" | "late" | "no_show" | "day_off" | "flexible" | "not_set";
   currentProject: string;
@@ -159,7 +159,16 @@ export type DashboardAlert = {
   userId: string;
   vaName: string;
   severity: "warning" | "critical";
-  type: "low_activity" | "stale_heartbeat" | "missing_heartbeat" | "crash_closed" | "late_start" | "no_show";
+  type:
+    | "low_activity"
+    | "stale_heartbeat"
+    | "missing_heartbeat"
+    | "crash_closed"
+    | "late_start"
+    | "no_show"
+    | "screenshot_sync"
+    | "queue_backlog"
+    | "restart_loop";
   title: string;
   message: string;
 };
@@ -172,6 +181,22 @@ type PersistedDashboardAlert = {
   type: DashboardAlert["type"];
   title: string;
   message: string;
+};
+
+type AgentHealthSnapshot = {
+  user_id: string;
+  install_id: string;
+  queue_size: number;
+  oldest_queue_item_at: string | null;
+  screenshot_failure_started_at: string | null;
+  screenshot_failure_count: number;
+  last_screenshot_uploaded_at: string | null;
+  last_health_ping_at: string;
+};
+
+type AgentAppLaunchEvent = {
+  user_id: string;
+  launched_at: string;
 };
 
 export type DashboardSummary = {
@@ -187,7 +212,7 @@ export type DashboardSummary = {
 
 const LOW_ACTIVITY_THRESHOLD = 30;
 const RECENT_ACTIVITY_MINUTES = 10;
-const ONLINE_HEARTBEAT_MINUTES = 5;
+const ONLINE_HEARTBEAT_MINUTES = 10;
 const RECENT_NON_WORKING_MINUTES = 60;
 const STALE_ENTRY_MINUTES = 10;
 const SCREENSHOT_BUCKET = process.env.NEXT_PUBLIC_SUPABASE_STORAGE_BUCKET ?? "screenshots";
@@ -218,7 +243,18 @@ export async function loadAdminProfile(supabase: SupabaseClient): Promise<Profil
 export async function loadDashboardSummary(
   supabase: SupabaseClient,
   timezone = "Asia/Karachi",
-  settings?: Partial<Pick<AppSettings, "low_activity_threshold" | "low_activity_minimum_minutes">>,
+  settings?: Partial<
+    Pick<
+      AppSettings,
+      | "low_activity_threshold"
+      | "low_activity_minimum_minutes"
+      | "connectivity_grace_minutes"
+      | "screenshot_failure_alert_minutes"
+      | "offline_queue_alert_count"
+      | "offline_queue_alert_minutes"
+      | "restart_loop_alert_count"
+    >
+  >,
   options: { includePersistedAlerts?: boolean; range?: DetailDateRange } = {},
 ): Promise<DashboardSummary> {
   const includePersistedAlerts = options.includePersistedAlerts ?? false;
@@ -230,7 +266,7 @@ export async function loadDashboardSummary(
   const queryEnd = latestIso([selectedRange.end, todayEnd]);
   const activitySince = minutesAgoIso(RECENT_ACTIVITY_MINUTES);
 
-  const [profilesResult, projectsResult, entriesResult, activityResult, screenshotsResult, persistedAlertsResult] = await Promise.all([
+  const [profilesResult, projectsResult, entriesResult, activityResult, screenshotsResult, persistedAlertsResult, agentHealthResult, appLaunchesResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate,expected_hours_per_week,schedule_type,shift_start_time,shift_end_time,working_days")
@@ -261,6 +297,13 @@ export async function loadDashboardSummary(
       .from("dashboard_alerts")
       .select("alert_key,user_id,va_name,severity,type,title,message")
       .eq("is_active", true),
+    supabase
+      .from("agent_health_snapshots")
+      .select("user_id,install_id,queue_size,oldest_queue_item_at,screenshot_failure_started_at,screenshot_failure_count,last_screenshot_uploaded_at,last_health_ping_at"),
+    supabase
+      .from("agent_app_launch_events")
+      .select("user_id,launched_at")
+      .gte("launched_at", todayStart),
   ]);
 
   if (profilesResult.error) throw profilesResult.error;
@@ -269,6 +312,8 @@ export async function loadDashboardSummary(
   if (activityResult.error) throw activityResult.error;
   if (screenshotsResult.error) throw screenshotsResult.error;
   if (persistedAlertsResult.error && persistedAlertsResult.error.code !== "42P01") throw persistedAlertsResult.error;
+  if (agentHealthResult.error && agentHealthResult.error.code !== "42P01") throw agentHealthResult.error;
+  if (appLaunchesResult.error && appLaunchesResult.error.code !== "42P01") throw appLaunchesResult.error;
 
   const profiles = (profilesResult.data ?? []) as Profile[];
   const projects = (projectsResult.data ?? []) as Project[];
@@ -285,6 +330,8 @@ export async function loadDashboardSummary(
     vaName: alert.va_name,
   }));
   const persistedAlertsByUser = groupAlertsByUser(persistedAlerts);
+  const agentHealthByUser = newestHealthSnapshotByUser((agentHealthResult.data ?? []) as AgentHealthSnapshot[]);
+  const launchEventsByUser = groupLaunchEventsByUser((appLaunchesResult.data ?? []) as AgentAppLaunchEvent[]);
   const screenshotsByUser = new Map(screenshots.map((screenshot) => [screenshot.user_id, screenshot]));
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
   const now = Date.now();
@@ -302,19 +349,26 @@ export async function loadDashboardSummary(
     const baseStatus = getStatus(activeEntry, latestEntry, profile.last_seen_at, now);
     const status = getDisplayStatus(profile, activeEntry, latestEntry, userTodayEntries, baseStatus, timezone, now);
     const scheduleStatus = getScheduleStatus(profile, userTodayEntries, timezone, now);
-    const hoursTodaySeconds = totalSecondsInRange(userEntries, selectedRange, now, profile.last_seen_at, status);
-    const weeklyHoursSeconds = totalSecondsInRange(userEntries, currentWeekRange(timezone), now, profile.last_seen_at, status);
+    const connectivityGraceMinutes = Number(settings?.connectivity_grace_minutes ?? "10");
+    const hoursTodaySeconds = totalSecondsInRange(userEntries, selectedRange, now, profile.last_seen_at, status, connectivityGraceMinutes);
+    const weeklyHoursSeconds = totalSecondsInRange(userEntries, currentWeekRange(timezone), now, profile.last_seen_at, status, connectivityGraceMinutes);
     const hourlyRate = Number(profile.hourly_rate ?? 0);
     const lowActivityThreshold = Number(settings?.low_activity_threshold ?? LOW_ACTIVITY_THRESHOLD);
     const calculatedAlerts = buildDashboardAlerts({
       activeEntry,
+      agentHealth: agentHealthByUser.get(profile.id) ?? null,
       activityPercent,
+      appLaunches: launchEventsByUser.get(profile.id) ?? [],
       latestEntry,
       lowActivityMinimumMinutes: Number((settings as Partial<AppSettings> | undefined)?.low_activity_minimum_minutes ?? "15"),
       lowActivityStreakMinutes: lowActivityStreakMinutes(userLogs, lowActivityThreshold),
       now,
+      queueAlertCount: Number(settings?.offline_queue_alert_count ?? "5"),
+      queueAlertMinutes: Number(settings?.offline_queue_alert_minutes ?? "10"),
       profile,
+      restartLoopAlertCount: Number(settings?.restart_loop_alert_count ?? "3"),
       scheduleStatus,
+      screenshotFailureAlertMinutes: Number(settings?.screenshot_failure_alert_minutes ?? "15"),
       status,
       threshold: lowActivityThreshold,
       timezone,
@@ -381,7 +435,13 @@ export async function closeStaleTimeEntries(supabase: SupabaseClient): Promise<n
   return Number(data ?? 0);
 }
 
-export async function loadVaDetail(supabase: SupabaseClient, userId: string, range?: DetailDateRange, timezone = "Asia/Karachi"): Promise<VaDetail> {
+export async function loadVaDetail(
+  supabase: SupabaseClient,
+  userId: string,
+  range?: DetailDateRange,
+  timezone = "Asia/Karachi",
+  settings?: Partial<Pick<AppSettings, "connectivity_grace_minutes">>,
+): Promise<VaDetail> {
   const selectedRange = range ?? { start: startOfTodayIso(timezone), end: new Date().toISOString() };
 
   const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult, userDevicesResult] = await Promise.all([
@@ -447,16 +507,17 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
   const latestEntry = newestEntry(entries);
   const lastDevice = newestDevice(userDevices);
   const status = getStatus(activeEntry, latestEntry, profile.last_seen_at, Date.now());
+  const connectivityGraceMinutes = Number(settings?.connectivity_grace_minutes ?? "10");
   const hourlyRate = Number(profile.hourly_rate ?? 0);
   const weekRange = currentWeekRange(timezone);
   const monthRange = currentMonthRange(timezone);
-  const weekSeconds = totalSecondsInRange(entries, weekRange, Date.now(), profile.last_seen_at, status);
-  const monthSeconds = totalSecondsInRange(entries, monthRange, Date.now(), profile.last_seen_at, status);
+  const weekSeconds = totalSecondsInRange(entries, weekRange, Date.now(), profile.last_seen_at, status, connectivityGraceMinutes);
+  const monthSeconds = totalSecondsInRange(entries, monthRange, Date.now(), profile.last_seen_at, status, connectivityGraceMinutes);
 
   return {
     profile,
     lastDevice,
-    totalHoursTodaySeconds: totalSecondsInRange(entries, selectedRange, Date.now(), profile.last_seen_at, status),
+    totalHoursTodaySeconds: totalSecondsInRange(entries, selectedRange, Date.now(), profile.last_seen_at, status, connectivityGraceMinutes),
     totalHoursWeekSeconds: weekSeconds,
     totalHoursMonthSeconds: monthSeconds,
     earningsThisWeek: earningsForSeconds(weekSeconds, hourlyRate),
@@ -465,11 +526,11 @@ export async function loadVaDetail(supabase: SupabaseClient, userId: string, ran
     productivityScore: productivityScore(averageActivity(activityLogs) ?? 0),
     screenshotCount: screenshotRows.length,
     lastSeenAt: profile.last_seen_at,
-    timeline: entries.map((entry) => toTimelineSegment(entry, projectNames, selectedRange, profile.last_seen_at, status)),
+    timeline: entries.map((entry) => toTimelineSegment(entry, projectNames, selectedRange, profile.last_seen_at, status, connectivityGraceMinutes)),
     screenshots,
     activityLogs,
     appUsage: buildAppUsage(activityLogs),
-    dailyPay: buildDailyPay(entries, selectedRange, timezone, hourlyRate, Date.now(), profile.last_seen_at, status),
+    dailyPay: buildDailyPay(entries, selectedRange, timezone, hourlyRate, Date.now(), profile.last_seen_at, status, connectivityGraceMinutes),
     projectOptions: projects
       .filter((project) => project.is_active !== false && assignedProjectIds.has(project.id))
       .sort((first, second) => first.name.localeCompare(second.name)),
@@ -610,13 +671,14 @@ function totalSecondsToday(
   now: number,
   lastSeenAt: string | null,
   status: DashboardRow["status"],
+  connectivityGraceMinutes: number,
 ): number {
   return entries.reduce((sum, entry) => {
     if (entry.stopped_at) {
       return sum + (entry.duration_seconds ?? 0);
     }
 
-    const endTime = status === "working" ? now : lastSeenAt ? new Date(lastSeenAt).getTime() : now;
+    const endTime = resolvedOpenEntryEndTime(now, lastSeenAt, status, connectivityGraceMinutes);
     return sum + Math.max(0, Math.floor((endTime - new Date(entry.started_at).getTime()) / 1000));
   }, 0);
 }
@@ -627,6 +689,7 @@ function totalSecondsInRange(
   now: number,
   lastSeenAt: string | null,
   status: DashboardRow["status"],
+  connectivityGraceMinutes: number,
 ): number {
   const rangeStart = new Date(range.start).getTime();
   const rangeEnd = new Date(range.end).getTime();
@@ -635,11 +698,7 @@ function totalSecondsInRange(
     const entryStart = new Date(entry.started_at).getTime();
     const entryEnd = entry.stopped_at
       ? new Date(entry.stopped_at).getTime()
-      : status === "working"
-        ? Math.min(now, rangeEnd)
-        : lastSeenAt
-          ? Math.min(new Date(lastSeenAt).getTime(), rangeEnd)
-          : rangeEnd;
+      : Math.min(resolvedOpenEntryEndTime(now, lastSeenAt, status, connectivityGraceMinutes), rangeEnd);
     const clampedStart = Math.max(entryStart, rangeStart);
     const clampedEnd = Math.min(entryEnd, rangeEnd);
     return sum + Math.max(0, Math.floor((clampedEnd - clampedStart) / 1000));
@@ -654,6 +713,7 @@ function buildDailyPay(
   now: number,
   lastSeenAt: string | null,
   status: DashboardRow["status"],
+  connectivityGraceMinutes: number,
 ) {
   const rows = new Map<string, number>();
   const rangeStart = new Date(range.start).getTime();
@@ -663,11 +723,7 @@ function buildDailyPay(
     const entryStart = new Date(entry.started_at).getTime();
     const entryEnd = entry.stopped_at
       ? new Date(entry.stopped_at).getTime()
-      : status === "working"
-        ? Math.min(now, rangeEnd)
-        : lastSeenAt
-          ? Math.min(new Date(lastSeenAt).getTime(), rangeEnd)
-          : entryStart;
+      : Math.min(resolvedOpenEntryEndTime(now, lastSeenAt, status, connectivityGraceMinutes), rangeEnd);
     const clampedStart = Math.max(entryStart, rangeStart);
     const clampedEnd = Math.min(entryEnd, rangeEnd);
     const seconds = Math.max(0, Math.floor((clampedEnd - clampedStart) / 1000));
@@ -770,37 +826,71 @@ function mergeAlerts(calculatedAlerts: DashboardAlert[], persistedAlerts: Dashbo
   return [...merged.values()].sort((first, second) => severityRank(second.severity) - severityRank(first.severity));
 }
 
+function newestHealthSnapshotByUser(snapshots: AgentHealthSnapshot[]) {
+  const result = new Map<string, AgentHealthSnapshot>();
+  for (const snapshot of snapshots) {
+    const current = result.get(snapshot.user_id);
+    if (!current || new Date(snapshot.last_health_ping_at).getTime() > new Date(current.last_health_ping_at).getTime()) {
+      result.set(snapshot.user_id, snapshot);
+    }
+  }
+  return result;
+}
+
+function groupLaunchEventsByUser(events: AgentAppLaunchEvent[]) {
+  const result = new Map<string, AgentAppLaunchEvent[]>();
+  for (const event of events) {
+    const bucket = result.get(event.user_id) ?? [];
+    bucket.push(event);
+    result.set(event.user_id, bucket);
+  }
+  return result;
+}
+
 function severityRank(severity: DashboardAlert["severity"]) {
   return severity === "critical" ? 2 : 1;
 }
 
 function buildDashboardAlerts({
   activeEntry,
+  agentHealth,
   activityPercent,
+  appLaunches,
   latestEntry,
   lowActivityMinimumMinutes,
   lowActivityStreakMinutes,
   now,
+  queueAlertCount,
+  queueAlertMinutes,
   profile,
+  restartLoopAlertCount,
   scheduleStatus,
+  screenshotFailureAlertMinutes,
   status,
   threshold,
   timezone,
 }: {
   activeEntry: TimeEntry | null;
+  agentHealth: AgentHealthSnapshot | null;
   activityPercent: number | null;
+  appLaunches: AgentAppLaunchEvent[];
   latestEntry: TimeEntry | null;
   lowActivityMinimumMinutes: number;
   lowActivityStreakMinutes: number;
   now: number;
+  queueAlertCount: number;
+  queueAlertMinutes: number;
   profile: Profile;
+  restartLoopAlertCount: number;
   scheduleStatus: DashboardRow["scheduleStatus"];
+  screenshotFailureAlertMinutes: number;
   status: DashboardRow["status"];
   threshold: number;
   timezone: string;
 }): DashboardAlert[] {
   const alerts: DashboardAlert[] = [];
   const lastSeenAgeMinutes = profile.last_seen_at ? (now - new Date(profile.last_seen_at).getTime()) / 60000 : null;
+  const healthPingAgeMinutes = agentHealth ? (now - new Date(agentHealth.last_health_ping_at).getTime()) / 60000 : null;
 
   if (status === "working" && activityPercent !== null && lowActivityStreakMinutes >= lowActivityMinimumMinutes) {
     alerts.push({
@@ -874,7 +964,67 @@ function buildDashboardAlerts({
     });
   }
 
+  if (
+    agentHealth?.screenshot_failure_started_at &&
+    healthPingAgeMinutes !== null &&
+    healthPingAgeMinutes <= ONLINE_HEARTBEAT_MINUTES &&
+    (now - new Date(agentHealth.screenshot_failure_started_at).getTime()) / 60000 >= screenshotFailureAlertMinutes
+  ) {
+    alerts.push({
+      id: `${profile.id}-screenshot-sync`,
+      userId: profile.id,
+      vaName: profile.full_name,
+      severity: "warning",
+      type: "screenshot_sync",
+      title: "Screenshot sync failing",
+      message: `Screenshot uploads have been failing for ${Math.floor((now - new Date(agentHealth.screenshot_failure_started_at).getTime()) / 60000)} minutes.`,
+    });
+  }
+
+  if (
+    agentHealth &&
+    healthPingAgeMinutes !== null &&
+    healthPingAgeMinutes <= ONLINE_HEARTBEAT_MINUTES &&
+    agentHealth.queue_size >= queueAlertCount &&
+    agentHealth.oldest_queue_item_at &&
+    (now - new Date(agentHealth.oldest_queue_item_at).getTime()) / 60000 >= queueAlertMinutes
+  ) {
+    alerts.push({
+      id: `${profile.id}-queue-backlog`,
+      userId: profile.id,
+      vaName: profile.full_name,
+      severity: "warning",
+      type: "queue_backlog",
+      title: "Offline queue backlog",
+      message: `${agentHealth.queue_size} queued sync items are waiting, and the oldest has been stuck for ${Math.floor((now - new Date(agentHealth.oldest_queue_item_at).getTime()) / 60000)} minutes.`,
+    });
+  }
+
+  const launchCount = launchesInCurrentShift(profile, appLaunches, timezone, now);
+  if (launchCount >= restartLoopAlertCount) {
+    alerts.push({
+      id: `${profile.id}-restart-loop`,
+      userId: profile.id,
+      vaName: profile.full_name,
+      severity: "critical",
+      type: "restart_loop",
+      title: "Possible crash loop",
+      message: `The desktop app has started ${launchCount} times in the current shift window.`,
+    });
+  }
+
   return alerts;
+}
+
+function launchesInCurrentShift(profile: Profile, appLaunches: AgentAppLaunchEvent[], timezone: string, now: number) {
+  if (!appLaunches.length) return 0;
+
+  let windowStart = new Date(startOfTodayIso(timezone)).getTime();
+  if (normalizedScheduleType(profile) === "fixed" && profile.shift_start_time && (profile.working_days ?? []).includes(weekdayKey(new Date(now), timezone))) {
+    windowStart = zonedDateTimeToUtc(todayDateInputValue(timezone), safeTime(profile.shift_start_time, "09:00"), timezone).getTime();
+  }
+
+  return appLaunches.filter((event) => new Date(event.launched_at).getTime() >= windowStart).length;
 }
 
 async function addSignedScreenshotUrls(
@@ -901,11 +1051,13 @@ function toTimelineSegment(
   range: DetailDateRange,
   lastSeenAt: string | null,
   status: DashboardRow["status"],
+  connectivityGraceMinutes: number,
 ): TimelineSegment {
   const rangeStart = new Date(range.start).getTime();
   const rangeEnd = new Date(range.end).getTime();
-  const rawEndAt = entry.stopped_at ?? (status === "working" ? new Date().toISOString() : lastSeenAt);
-  const rawEndTime = rawEndAt ? new Date(rawEndAt).getTime() : rangeEnd;
+  const rawEndTime = entry.stopped_at
+    ? new Date(entry.stopped_at).getTime()
+    : resolvedOpenEntryEndTime(Date.now(), lastSeenAt, status, connectivityGraceMinutes);
   const displayStartTime = Math.max(new Date(entry.started_at).getTime(), rangeStart);
   const displayEndTime = Math.min(rawEndTime, rangeEnd);
   const endAt = new Date(displayEndTime).toISOString();
@@ -960,6 +1112,11 @@ function getStatus(
   if (activeEntry && lastSeenAt) {
     const lastSeenAgeMinutes = (now - new Date(lastSeenAt).getTime()) / 60000;
     if (lastSeenAgeMinutes <= ONLINE_HEARTBEAT_MINUTES) return "working";
+    return "sync_delayed";
+  }
+
+  if (activeEntry) {
+    return "sync_delayed";
   }
 
   if (!latestEntry) {
@@ -999,6 +1156,10 @@ function buildStatusDetail(
 ) {
   if (status === "working") {
     return lastSeenAt ? `Last activity ${relativeTimeFrom(lastSeenAt, now)}` : "Working now";
+  }
+
+  if (status === "sync_delayed") {
+    return lastSeenAt ? `Sync delayed, last heartbeat ${relativeTimeFrom(lastSeenAt, now)}` : "Sync delayed, waiting for heartbeat";
   }
 
   if (status === "on_break") {
@@ -1043,4 +1204,15 @@ function relativeTimeFrom(value: string, now: number) {
   }
   const days = Math.floor(hours / 24);
   return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
+function resolvedOpenEntryEndTime(
+  now: number,
+  lastSeenAt: string | null,
+  status: DashboardRow["status"],
+  connectivityGraceMinutes: number,
+) {
+  if (status === "working") return now;
+  if (!lastSeenAt) return now;
+  return Math.min(new Date(lastSeenAt).getTime() + Math.max(1, connectivityGraceMinutes) * 60 * 1000, now);
 }

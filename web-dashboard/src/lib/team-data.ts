@@ -12,7 +12,11 @@ export type ManagedVa = {
   hourlyRate: number;
   totalHoursSeconds: number;
   assignedProjectIds: string[];
-  assignedProjects: string[];
+  assignedProjects: {
+    id: string;
+    name: string;
+    isActive: boolean;
+  }[];
   scheduleType: "flexible" | "fixed";
   shiftStartTime: string | null;
   shiftEndTime: string | null;
@@ -74,6 +78,7 @@ type AssignmentRow = {
 type ProjectRow = {
   id: string;
   name: string;
+  is_active: boolean;
 };
 
 type UserDeviceRow = {
@@ -95,7 +100,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
       .eq("role", "va")
       .order("full_name", { ascending: true }),
     supabase.from("time_entries").select("user_id,duration_seconds").gte("started_at", weekStart),
-    supabase.from("projects").select("id,name"),
+    supabase.from("projects").select("id,name,is_active"),
     supabase.from("project_assignments").select("user_id,project_id"),
     supabase.from("user_devices").select("id,user_id,hostname,os_username,first_seen_at,last_login_at,last_seen_at"),
   ]);
@@ -111,7 +116,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
   const assignments = (assignmentsResult.data ?? []) as AssignmentRow[];
   const projects = (projectsResult.data ?? []) as ProjectRow[];
   const devices = (devicesResult.data ?? []) as UserDeviceRow[];
-  const projectNames = new Map(projects.map((project) => [project.id, project.name]));
+  const projectById = new Map(projects.map((project) => [project.id, project]));
   const latestDeviceByUser = new Map<string, UserDeviceRow>();
 
   for (const device of devices) {
@@ -125,6 +130,15 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
     team: profiles.map((profile) => {
       const userEntries = entries.filter((entry) => entry.user_id === profile.id);
       const userAssignments = assignments.filter((assignment) => assignment.user_id === profile.id);
+      const assignedProjects = userAssignments.map((assignment) => {
+        const project = projectById.get(assignment.project_id);
+
+        return {
+          id: assignment.project_id,
+          isActive: project?.is_active ?? false,
+          name: project?.name ?? "Unknown project",
+        };
+      });
 
       return {
         id: profile.id,
@@ -136,8 +150,8 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
         created_at: profile.created_at,
         lastSeenAt: profile.last_seen_at,
         totalHoursSeconds: userEntries.reduce((sum, entry) => sum + (entry.duration_seconds ?? 0), 0),
-        assignedProjectIds: userAssignments.map((assignment) => assignment.project_id),
-        assignedProjects: userAssignments.map((assignment) => projectNames.get(assignment.project_id) ?? "Unknown"),
+        assignedProjectIds: assignedProjects.filter((project) => project.isActive).map((project) => project.id),
+        assignedProjects,
         scheduleType: profile.schedule_type === "fixed" ? "fixed" : "flexible",
         shiftStartTime: profile.shift_start_time,
         shiftEndTime: profile.shift_end_time,
@@ -145,7 +159,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
         lastDevice: latestDeviceByUser.get(profile.id) ?? null,
       };
     }),
-    projects: projects.map((project) => ({ id: project.id, name: project.name })),
+    projects: projects.filter((project) => project.is_active).map((project) => ({ id: project.id, name: project.name })),
   };
 }
 

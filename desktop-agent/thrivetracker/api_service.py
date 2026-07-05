@@ -33,8 +33,32 @@ class Project:
 @dataclass(frozen=True)
 class TimeEntry:
     id: str
-    project_id: str
+    project_id: str | None
     started_at: datetime
+    device_hostname: str | None = None
+    device_os_username: str | None = None
+    device_fingerprint: str | None = None
+
+
+@dataclass(frozen=True)
+class RangeTimeEntry:
+    id: str
+    started_at: datetime
+    stopped_at: datetime | None
+
+
+@dataclass(frozen=True)
+class SessionSnapshot:
+    active_entry: TimeEntry | None
+    last_seen_at: datetime | None
+
+
+@dataclass(frozen=True)
+class VaSchedule:
+    schedule_type: str
+    shift_start_time: str | None
+    shift_end_time: str | None
+    working_days: list[str]
 
 
 class SupabaseApiService:
@@ -118,18 +142,21 @@ class SupabaseApiService:
             id=row["id"],
             project_id=row["project_id"],
             started_at=_parse_supabase_datetime(row["started_at"]),
+            device_hostname=row.get("device_hostname"),
+            device_os_username=row.get("device_os_username"),
+            device_fingerprint=row.get("device_fingerprint"),
         )
 
-    def stop_time_entry(self, entry: TimeEntry, reason: str = "manual") -> int:
+    def stop_time_entry(self, entry: TimeEntry, reason: str = "manual") -> int | None:
         stopped_at = datetime.now(timezone.utc)
         duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
-        self.update_time_entry_stop(
+        updated = self.update_time_entry_stop(
             entry_id=entry.id,
             stopped_at=stopped_at.isoformat(),
             duration_seconds=duration_seconds,
             reason=reason,
         )
-        return duration_seconds
+        return duration_seconds if updated else None
 
     def update_time_entry_stop(
         self,
@@ -137,17 +164,18 @@ class SupabaseApiService:
         stopped_at: str,
         duration_seconds: int,
         reason: str,
-    ) -> None:
-        self._request(
+    ) -> bool:
+        data = self._request(
             "PATCH",
-            f"/rest/v1/time_entries?id=eq.{quote(entry_id)}",
+            f"/rest/v1/time_entries?id=eq.{quote(entry_id)}&stopped_at=is.null",
             json={
                 "stopped_at": stopped_at,
                 "duration_seconds": duration_seconds,
                 "stop_reason": reason,
             },
-            prefer="return=minimal",
+            prefer="return=representation",
         )
+        return bool(data)
 
     def upload_screenshot(
         self,
@@ -225,28 +253,128 @@ class SupabaseApiService:
             prefer="return=minimal",
         )
 
-    def get_today_total_seconds(self) -> int:
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        query = (
+    def get_time_entries_in_range(self, start_iso: str, end_iso: str) -> list[RangeTimeEntry]:
+        base_query = (
             "/rest/v1/time_entries"
-            "?select=duration_seconds,started_at"
+            "?select=id,started_at,stopped_at"
             f"&user_id=eq.{quote(self.user.user_id)}"
-            f"&started_at=gte.{quote(today_start.isoformat())}"
+            f"&started_at=lte.{quote(end_iso)}"
         )
-        data = self._request("GET", query)
-        return sum(int(item.get("duration_seconds") or 0) for item in data)
+        closed_rows = self._request(
+            "GET",
+            f"{base_query}&stopped_at=gte.{quote(start_iso)}",
+        ) or []
+        open_rows = self._request(
+            "GET",
+            f"{base_query}&stopped_at=is.null",
+        ) or []
+
+        rows_by_id = {
+            row["id"]: RangeTimeEntry(
+                id=row["id"],
+                started_at=_parse_supabase_datetime(row["started_at"]),
+                stopped_at=_parse_supabase_datetime(row["stopped_at"]) if row.get("stopped_at") else None,
+            )
+            for row in [*closed_rows, *open_rows]
+        }
+        return list(rows_by_id.values())
+
+    def get_session_snapshot(self) -> SessionSnapshot:
+        profile_rows = self._request(
+            "GET",
+            f"/rest/v1/profiles?select=last_seen_at&id=eq.{quote(self.user.user_id)}",
+        ) or []
+        active_rows = self._request(
+            "GET",
+            (
+                "/rest/v1/time_entries"
+                "?select=id,project_id,started_at,device_hostname,device_os_username,device_fingerprint"
+                f"&user_id=eq.{quote(self.user.user_id)}"
+                "&stopped_at=is.null"
+                "&order=started_at.desc"
+                "&limit=1"
+            ),
+        ) or []
+
+        profile_row = profile_rows[0] if profile_rows else None
+        active_row = active_rows[0] if active_rows else None
+
+        active_entry = None
+        if active_row:
+            active_entry = TimeEntry(
+                id=active_row["id"],
+                project_id=active_row.get("project_id"),
+                started_at=_parse_supabase_datetime(active_row["started_at"]),
+                device_hostname=active_row.get("device_hostname"),
+                device_os_username=active_row.get("device_os_username"),
+                device_fingerprint=active_row.get("device_fingerprint"),
+            )
+
+        return SessionSnapshot(
+            active_entry=active_entry,
+            last_seen_at=_parse_supabase_datetime(profile_row["last_seen_at"]) if profile_row and profile_row.get("last_seen_at") else None,
+        )
 
     def get_settings(self) -> dict[str, str]:
         data = self._request("GET", "/rest/v1/settings?select=key,value")
         return {item["key"]: item["value"] for item in data}
 
-    def record_heartbeat(self, install_id: str) -> None:
+    def get_va_schedule(self) -> VaSchedule:
+        rows = self._request(
+            "GET",
+            (
+                "/rest/v1/profiles"
+                "?select=schedule_type,shift_start_time,shift_end_time,working_days"
+                f"&id=eq.{quote(self.user.user_id)}"
+                "&limit=1"
+            ),
+        ) or []
+        row = rows[0] if rows else {}
+        working_days = row.get("working_days") or []
+        return VaSchedule(
+            schedule_type=row.get("schedule_type") or "flexible",
+            shift_start_time=row.get("shift_start_time"),
+            shift_end_time=row.get("shift_end_time"),
+            working_days=list(working_days) if isinstance(working_days, list) else [],
+        )
+
+    def record_app_launch(self, install_id: str, hostname: str) -> None:
         self._request(
             "POST",
-            "/rest/v1/rpc/record_heartbeat",
-            json={"p_install_id": install_id},
+            "/rest/v1/rpc/record_agent_app_launch",
+            json={
+                "p_install_id": install_id,
+                "p_hostname": hostname,
+            },
             prefer="return=minimal",
         )
+
+    def record_heartbeat(self, install_id: str, health: dict | None = None) -> None:
+        payload = {
+            "p_install_id": install_id,
+            "p_queue_size": int(health.get("queue_size", 0)) if health else 0,
+            "p_oldest_queue_item_at": health.get("oldest_queue_item_at") if health else None,
+            "p_screenshot_failure_started_at": health.get("screenshot_failure_started_at") if health else None,
+            "p_screenshot_failure_count": int(health.get("screenshot_failure_count", 0)) if health else 0,
+            "p_last_screenshot_uploaded_at": health.get("last_screenshot_uploaded_at") if health else None,
+            "p_hostname": health.get("hostname") if health else None,
+        }
+        try:
+            self._request(
+                "POST",
+                "/rest/v1/rpc/record_heartbeat",
+                json=payload,
+                prefer="return=minimal",
+            )
+        except ApiError:
+            if not health:
+                raise
+            self._request(
+                "POST",
+                "/rest/v1/rpc/record_heartbeat",
+                json={"p_install_id": install_id},
+                prefer="return=minimal",
+            )
 
     def _request(
         self,

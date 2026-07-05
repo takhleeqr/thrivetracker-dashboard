@@ -284,6 +284,7 @@ Done when: activity logs include useful window/app context.
 - [x] Show resume prompt after idle pause.
 - [x] Create a new time entry if VA resumes.
 - [x] Keep timer stopped if VA declines resume.
+- [x] Keep idle-stop durable if the internet drops or the app closes mid-pause.
 
 Done when: idle time is not counted as active tracked time.
 
@@ -298,6 +299,7 @@ Done when: idle time is not counted as active tracked time.
 - [x] Delete queue rows only after confirmed success.
 - [x] Add basic queue status in UI and logs.
 - [x] Confirm retry replay includes stop events, activity logs, and screenshots.
+- [x] Skip repeated dead screenshot retries so stop/activity items behind them can still replay.
 
 Done when: the agent can continue working offline and sync later.
 
@@ -310,6 +312,8 @@ Done when: the agent can continue working offline and sync later.
 - [x] Apply idle timeout.
 - [ ] Apply low activity threshold if used locally.
 - [x] Apply max screenshots per day.
+- [x] Apply connection-loss grace from admin settings.
+- [x] Apply fixed-shift reminder delay from admin settings.
 - [x] Keep using last synced settings if a settings refresh fails.
 
 Done when: admin settings can change agent behavior without reinstalling.
@@ -317,10 +321,11 @@ Done when: admin settings can change agent behavior without reinstalling.
 ### Chunk 3.11: System Tray
 
 - [x] Add tray icon using `pystray`.
-- [x] Add menu items: Start/Stop, Show Window, Quit.
+- [x] Add menu items: Start/Stop, Show Window, Logout, Quit.
 - [x] Keep tracking while window is minimized.
 - [x] Make quit behavior safe when timer is running.
 - [x] Restore window cleanly from tray.
+- [x] Show tray state for tracking, paused, stopped, and attention-needed states.
 
 Done when: the agent behaves like a normal background time tracker.
 
@@ -379,6 +384,8 @@ Done when: only admins can use the dashboard.
 - [x] Include rolling activity.
 - [x] Include last screenshot thumbnail.
 - [x] Link each VA to detail view.
+- [x] Show `Sync Delayed` instead of incorrectly marking working VAs fully offline during short sync gaps.
+- [x] Surface screenshot-sync, queue-backlog, and restart-loop health alerts.
 
 Done when: admin can see current team status at a glance.
 
@@ -398,6 +405,8 @@ Done when: admin can see current team status at a glance.
 - [x] Build activity chart.
 - [x] Build app usage section.
 - [x] Build time entries table.
+- [x] Add next/previous screenshot navigation inside the lightbox.
+- [x] Close screenshot lightbox when clicking outside the image.
 
 Done when: admin can inspect a VA's day from time, screenshots, activity, and apps.
 
@@ -411,6 +420,7 @@ Done when: admin can inspect a VA's day from time, screenshots, activity, and ap
 - [x] Add VA assignment multi-select.
 - [x] Add delete/deactivate behavior.
 - [x] Show total hours and last activity.
+- [x] Clear VA assignments when a project is deactivated.
 
 Done when: admin can manage projects and assignments.
 
@@ -449,6 +459,7 @@ Done when: admin can export usable reports.
 - [x] Reset password.
 - [x] Deactivate user.
 - [x] Show status, last seen, and weekly total hours.
+- [x] Show inactive project assignments clearly if legacy rows still exist.
 
 Done when: admin can manage VA accounts from the dashboard.
 
@@ -464,6 +475,9 @@ Done when: admin can manage VA accounts from the dashboard.
 - [x] Add max screenshots per day input.
 - [x] Add timezone dropdown.
 - [x] Save to Supabase `settings`.
+- [x] Add connection-loss grace input.
+- [x] Add queue/screenshot/restart health alert inputs.
+- [x] Add fixed-shift reminder delay input.
 
 Done when: admin settings are saved and picked up by the desktop agent.
 

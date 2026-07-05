@@ -25,6 +25,8 @@ class AppConfig:
     screenshot_quality: int
     max_screenshots_per_day: int
     idle_timeout_minutes: int
+    connectivity_grace_minutes: int
+    shift_start_reminder_delay_minutes: int
 
     def with_settings(self, settings: dict[str, str]) -> "AppConfig":
         return replace(
@@ -41,6 +43,16 @@ class AppConfig:
                 self.max_screenshots_per_day,
             ),
             idle_timeout_minutes=_int_from_mapping(settings, "idle_timeout_minutes", self.idle_timeout_minutes),
+            connectivity_grace_minutes=_int_from_mapping(
+                settings,
+                "connectivity_grace_minutes",
+                self.connectivity_grace_minutes,
+            ),
+            shift_start_reminder_delay_minutes=_int_from_mapping(
+                settings,
+                "shift_start_reminder_delay_minutes",
+                self.shift_start_reminder_delay_minutes,
+            ),
             timezone=settings.get("timezone", self.timezone) or self.timezone,
         )
 
@@ -102,6 +114,8 @@ def get_config(paths: AppPaths) -> AppConfig:
         screenshot_quality=_int_from_env("SCREENSHOT_QUALITY", 60),
         max_screenshots_per_day=_int_from_env("MAX_SCREENSHOTS_PER_DAY", 200),
         idle_timeout_minutes=_int_from_env("IDLE_TIMEOUT_MINUTES", 5),
+        connectivity_grace_minutes=_int_from_env("CONNECTIVITY_GRACE_MINUTES", 10),
+        shift_start_reminder_delay_minutes=_int_from_env("SHIFT_START_REMINDER_DELAY_MINUTES", 10),
     )
 
 

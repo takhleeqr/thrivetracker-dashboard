@@ -20,7 +20,12 @@ Open Supabase Dashboard:
 3. Run these files in order if you have not already run them:
    - `supabase/migrations/003_payroll_schedule_alert_settings.sql`
    - `supabase/migrations/004_dashboard_alerts.sql`
-4. Confirm both finish without red errors.
+   - `supabase/migrations/010_connection_loss_grace_setting.sql`
+   - `supabase/migrations/011_schedule_stale_time_entry_cleanup.sql`
+   - `supabase/migrations/012_raise_connectivity_grace_default.sql`
+   - `supabase/migrations/013_agent_health_and_reminder_settings.sql`
+   - `supabase/migrations/014_cleanup_inactive_project_assignments.sql`
+4. Confirm all finish without red errors.
 
 Do not rerun or edit `supabase/migrations/001_initial_schema.sql` unless you are creating a fresh database.
 
@@ -137,7 +142,7 @@ Expected result:
 }
 ```
 
-`activeAlerts` can be more than `0` if a VA is late, no-show, stale, crashed, or low activity.
+`activeAlerts` can be more than `0` if a VA is late, no-show, low activity, sync delayed, failing screenshot sync, building queue backlog, or relaunching repeatedly.
 
 ## Step 7: Build Desktop Agent For Production
 
@@ -160,8 +165,10 @@ Before giving it to VAs, test it yourself:
 2. Log in as a VA.
 3. Start timer.
 4. Wait for activity and screenshots.
-5. Stop timer.
-6. Confirm the production dashboard updates.
+5. Trigger an idle pause and confirm the timer stops cleanly.
+6. Simulate a short internet drop and confirm the timer stops after the grace period, not instantly.
+7. Reopen after a crash and confirm valid session recovery behaves correctly.
+8. Stop timer and confirm the production dashboard updates.
 
 ## Step 8: Give VAs The App
 
@@ -179,9 +186,10 @@ For each VA:
 Managers should check:
 
 - Overview page for `Needs Attention`.
+- Overview page for `Sync Delayed` or health-related alerts.
 - VA Detail page for screenshots, apps, timeline, and breaks.
 - Reports page for payroll and Excel exports.
-- Team page for active/inactive VAs and expected hours.
+- Team page for active/inactive VAs, expected hours, and any inactive project assignments that still need cleanup.
 - Settings page for timezone, thresholds, and unproductive apps.
 
 ## If Something Breaks

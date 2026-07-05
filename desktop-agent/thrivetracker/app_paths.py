@@ -9,6 +9,8 @@ from . import __app_name__
 class AppPaths:
     base_dir: Path
     config_file: Path
+    session_state_file: Path
+    lock_file: Path
     queue_dir: Path
     logs_dir: Path
     temp_dir: Path
@@ -21,6 +23,8 @@ def get_app_paths() -> AppPaths:
     return AppPaths(
         base_dir=base_dir,
         config_file=base_dir / "config.json",
+        session_state_file=base_dir / "session-state.json",
+        lock_file=base_dir / "instance.lock",
         queue_dir=base_dir / "queue",
         logs_dir=base_dir / "logs",
         temp_dir=base_dir / "temp",

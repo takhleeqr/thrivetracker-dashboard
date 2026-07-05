@@ -1,8 +1,10 @@
 import tkinter as tk
 from tkinter import ttk
+from tkinter import messagebox
 import logging
 
 from . import __app_name__, __version__
+from .app_lock import AppLock, AppLockError
 from .app_paths import ensure_app_dirs, get_app_paths
 from .config import get_config
 from .device_identity import get_device_identity
@@ -21,6 +23,8 @@ class DesktopApp:
         self.root = root
         self.paths = get_app_paths()
         ensure_app_dirs(self.paths)
+        self.app_lock = AppLock(self.paths.lock_file)
+        self.app_lock.acquire()
         configure_logging(self.paths.logs_dir)
         self.config = get_config(self.paths)
         self.device = get_device_identity(self.paths)
@@ -47,6 +51,7 @@ class DesktopApp:
         style.configure("TButton", font=("Segoe UI", 10), padding=(14, 8))
         style.configure("TCheckbutton", background="#F8FAFC", foreground="#0F172A", font=("Segoe UI", 10))
         style.configure("TCombobox", padding=(8, 6))
+        style.configure("Link.TButton", font=("Segoe UI", 9, "underline"), padding=0, foreground="#2563EB", background="#F8FAFC", borderwidth=0)
 
     def clear(self) -> None:
         for child in self.root.winfo_children():
@@ -54,6 +59,7 @@ class DesktopApp:
 
     def show_login(self) -> None:
         self.clear()
+        self.config = get_config(self.paths)
         LOGGER.info("Showing login window for desktop agent v%s", __version__)
         LoginWindow(self.root, self.paths, self.config, self.show_main)
 
@@ -69,8 +75,12 @@ class DesktopApp:
             self.paths.temp_dir,
             self.paths.queue_dir,
             self.hide_to_tray,
+            self.notify_user,
+            self.set_tray_state,
+            self.logout_to_login,
         )
         self._start_tray()
+        self.main_window.refresh_external_state()
         self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
     def _start_tray(self) -> None:
@@ -79,6 +89,7 @@ class DesktopApp:
 
         self.tray = TrayController(
             on_toggle_tracking=lambda: self.root.after(0, self.toggle_tracking_from_tray),
+            on_logout=lambda: self.root.after(0, self.logout_from_tray),
             on_show_window=lambda: self.root.after(0, self.show_window),
             on_quit=lambda: self.root.after(0, self.quit_from_tray),
         )
@@ -100,18 +111,50 @@ class DesktopApp:
         self.show_window()
         self.main_window.toggle_tracking_from_tray()
 
+    def logout_from_tray(self) -> None:
+        self.show_window()
+        if self.main_window:
+            self.main_window.request_logout()
+
+    def logout_to_login(self) -> None:
+        self.main_window = None
+        self.set_tray_state("stopped")
+        self.show_login()
+        self.show_window()
+
+    def set_tray_state(self, state: str) -> None:
+        if self.tray:
+            self.tray.set_state(state)
+
+    def notify_user(self, message: str, title: str | None = None) -> None:
+        if self.tray:
+            self.tray.notify(message, title)
+
     def quit_from_tray(self) -> None:
         if self.main_window:
             self.main_window.stop_for_app_close()
         if self.tray:
             self.tray.stop()
+        self.app_lock.release()
         self.root.destroy()
 
 
 def main() -> int:
     root = tk.Tk()
-    DesktopApp(root)
-    root.mainloop()
+    app: DesktopApp | None = None
+    try:
+        app = DesktopApp(root)
+    except AppLockError as error:
+        root.withdraw()
+        messagebox.showerror(__app_name__, str(error), parent=root)
+        root.destroy()
+        return 1
 
-    LOGGER.info("Desktop agent scaffold closed")
+    try:
+        root.mainloop()
+    finally:
+        if app:
+            app.app_lock.release()
+        LOGGER.info("Desktop agent scaffold closed")
+
     return 0
