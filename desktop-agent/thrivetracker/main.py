@@ -35,7 +35,7 @@ class DesktopApp:
 
     def _configure_root(self) -> None:
         self.root.title(__app_name__)
-        self.root.geometry("440x520")
+        self.root.geometry("440x560")
         self.root.minsize(420, 440)
         self.root.configure(bg="#F8FAFC")
 

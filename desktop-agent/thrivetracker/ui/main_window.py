@@ -495,7 +495,17 @@ class MainWindow(ttk.Frame):
                 pass
             projects = self.api.get_assigned_projects()
             schedule = self.api.get_va_schedule()
-            runtime_state = self.api.get_agent_runtime_state()
+            # Runtime state (minimum version, update URL) is fetched by _sync_settings
+            # which fires immediately after startup. We use a blank default here so
+            # the initial load does not need an extra serial round-trip.
+            runtime_state = AgentRuntimeState(
+                force_reauth_nonce=0,
+                force_reauth_reason=None,
+                force_reauth_requested_at=None,
+                minimum_desktop_version="",
+                desktop_update_download_url="",
+                desktop_update_required_message="",
+            )
             persisted_state = self.session_state.load()
             startup_state = self._reconcile_startup_state(self.api.get_session_snapshot(), persisted_state)
             today_entries = self.api.get_time_entries_in_range(*self._today_range_iso())
@@ -2052,6 +2062,27 @@ def format_duration(total_seconds: int, show_seconds: bool = False) -> str:
 
 def _is_valid_time(value: str | None) -> bool:
     return bool(value and len(value) == 5 and value[2] == ":" and value[:2].isdigit() and value[3:].isdigit())
+
+
+def _compare_versions(a: str, b: str) -> int:
+    """Return -1 if a < b, 0 if a == b, 1 if a > b.
+    An empty or missing b means no minimum is set, so always returns 0 (no update needed).
+    """
+    if not b or not a:
+        return 0
+    try:
+        a_parts = [int(x) for x in a.split(".")]
+        b_parts = [int(x) for x in b.split(".")]
+        max_len = max(len(a_parts), len(b_parts))
+        a_parts += [0] * (max_len - len(a_parts))
+        b_parts += [0] * (max_len - len(b_parts))
+        if a_parts < b_parts:
+            return -1
+        if a_parts > b_parts:
+            return 1
+        return 0
+    except (ValueError, AttributeError):
+        return 0
 
 
 class ToolTip:
