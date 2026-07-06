@@ -11,6 +11,7 @@ Use this after deployment. Do not skip the boring checks; boring checks catch ex
 - [ ] `012_raise_connectivity_grace_default.sql` has been run.
 - [ ] `013_agent_health_and_reminder_settings.sql` has been run.
 - [ ] `014_cleanup_inactive_project_assignments.sql` has been run.
+- [ ] `017_agent_events_version_controls.sql` has been run.
 - [ ] `profiles` table has at least one admin.
 - [ ] `profiles` table has at least one VA.
 - [ ] `projects` table has at least one active project.
@@ -73,6 +74,9 @@ Invoke-RestMethod -Uri "https://your-vercel-domain.vercel.app/api/alerts/recalcu
 ## 6. Desktop Agent
 
 - [ ] `.exe` opens.
+- [ ] First packaged run shows the install screen and relaunches the installed copy.
+- [ ] Installed copy exists in `%LOCALAPPDATA%\Programs\ThriveTracker`.
+- [ ] Start Menu shortcut opens the installed copy.
 - [ ] VA can log in.
 - [ ] Remember Me works as expected.
 - [ ] VA sees only assigned projects.
@@ -89,6 +93,7 @@ Invoke-RestMethod -Uri "https://your-vercel-domain.vercel.app/api/alerts/recalcu
 - [ ] JWT refresh works after long idle/overnight usage.
 - [ ] Heartbeat updates `last_seen_at`.
 - [ ] Tray `Logout` returns to login and clears remembered session state.
+- [ ] `Update Now` can download the latest `.exe`, restart, and reopen the updated installed copy.
 
 ## 7. Overview Page
 
@@ -148,6 +153,8 @@ Invoke-RestMethod -Uri "https://your-vercel-domain.vercel.app/api/alerts/recalcu
 - [ ] Late start time saves.
 - [ ] Work start/end time saves.
 - [ ] Connection-loss grace saves.
+- [ ] Minimum desktop version saves.
+- [ ] Desktop update download URL saves.
 - [ ] Screenshot-failure, queue-backlog, restart-loop, and shift-reminder settings save.
 - [ ] Unproductive app JSON saves.
 - [ ] Productivity Score explanation is visible.

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Activity, ArrowLeft, Camera, ChevronLeft, ChevronRight, Clock3, Download, Monitor, Plus, RefreshCw, Rows3, TimerReset, X, type LucideIcon } from "lucide-react";
 import { Button, Card, Input, ModalFrame, Select, Table, Tabs } from "@/components/ui";
 import type { ActivityLog, DetailDateRange, Screenshot, VaDetail } from "@/lib/dashboard-data";
@@ -65,6 +65,7 @@ export default function VaDetailPage() {
   const [detail, setDetail] = useState<VaDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [refreshNotice, setRefreshNotice] = useState("");
   const [lastUpdatedAt, setLastUpdatedAt] = useState<Date | null>(null);
   const [rangeMode, setRangeMode] = useState<RangeMode>("last24h");
@@ -78,8 +79,10 @@ export default function VaDetailPage() {
   const [manualForm, setManualForm] = useState<ManualEntryForm>(() => createManualEntryForm(todayDateInputValue("Asia/Karachi")));
   const [manualError, setManualError] = useState("");
   const [isSavingManual, setIsSavingManual] = useState(false);
+  const [isForcingReauth, setIsForcingReauth] = useState(false);
   const [unproductiveApps, setUnproductiveApps] = useState<string[]>([]);
   const [isReady, setIsReady] = useState(false);
+  const hasLoadedDetailRef = useRef(false);
 
   const selectedRange = useMemo(
     () => buildDateRange(rangeMode, customStart, customEnd, timezone),
@@ -133,13 +136,15 @@ export default function VaDetailPage() {
   ) {
     try {
       setError("");
+      setMessage("");
       setRefreshNotice("");
       const nextDetail = await loadVaDetail(supabase, userId, range, selectedTimezone, { connectivity_grace_minutes: connectivityGraceMinutes });
       setDetail(nextDetail);
+      hasLoadedDetailRef.current = true;
       setLastUpdatedAt(new Date());
     } catch (refreshError) {
       const message = refreshError instanceof Error ? refreshError.message : "Could not load VA detail.";
-      if (options.background && detail) {
+      if (options.background && hasLoadedDetailRef.current) {
         setRefreshNotice("Live refresh is delayed. Showing the last loaded VA detail.");
         return;
       }
@@ -205,6 +210,29 @@ export default function VaDetailPage() {
 
     setIsManualModalOpen(false);
     await refreshData();
+  }
+
+  async function forceAgentRelogin() {
+    if (!detail) return;
+    const confirmed = window.confirm(`Require ${detail.profile.full_name} to sign in again on the desktop agent?`);
+    if (!confirmed) return;
+
+    try {
+      setError("");
+      setMessage("");
+      setIsForcingReauth(true);
+      const { error: rpcError } = await supabase.rpc("request_agent_force_reauth", {
+        p_reason: "An admin asked you to sign in again.",
+        p_user_id: userId,
+      });
+      if (rpcError) throw rpcError;
+      setMessage("The desktop agent will ask this VA to sign in again on its next successful check-in.");
+      await refreshData();
+    } catch (reauthError) {
+      setError(reauthError instanceof Error ? reauthError.message : "Could not require agent re-login.");
+    } finally {
+      setIsForcingReauth(false);
+    }
   }
 
   const activityItems = useMemo(() => buildActivityLogItems(detail), [detail]);
@@ -307,6 +335,10 @@ export default function VaDetailPage() {
           </p>
         </div>
         <div className="topbar-actions">
+          <Button disabled={isForcingReauth || !detail} onClick={forceAgentRelogin} type="button" variant="secondary">
+            <TimerReset size={16} />
+            {isForcingReauth ? "Sending..." : "Require Re-login"}
+          </Button>
           <Button onClick={openManualEntryModal} type="button" variant="secondary">
             <Plus size={16} />
             Add Manual Entry
@@ -348,6 +380,7 @@ export default function VaDetailPage() {
       </Card>
 
       {error ? <div className="toast">{error}</div> : null}
+      {message ? <div className="toast success-toast">{message}</div> : null}
 
       {detail ? (
         <>
@@ -748,9 +781,18 @@ function SelectionDetailsCard({
           <div className="app-usage-row">
             <span>
               <strong>Last heartbeat</strong>
-              <small>{detail.lastDevice.last_seen_at ? formatDateTimeFull(detail.lastDevice.last_seen_at, timezone) : "No heartbeat yet"}</small>
+              <small>{detail.latestAgentHealth?.last_health_ping_at ? formatDateTimeFull(detail.latestAgentHealth.last_health_ping_at, timezone) : detail.lastDevice.last_seen_at ? formatDateTimeFull(detail.lastDevice.last_seen_at, timezone) : "No heartbeat yet"}</small>
             </span>
             <b>Live</b>
+          </div>
+        ) : null}
+        {!selectedSession && !selectedActivity && detail.latestAgentHealth ? (
+          <div className="app-usage-row">
+            <span>
+              <strong>Agent version</strong>
+              <small>{detail.latestAgentHealth.app_version || "Version not reported yet"}</small>
+            </span>
+            <b>Build</b>
           </div>
         ) : null}
         {selectedSession ? (
@@ -790,6 +832,36 @@ function SelectionDetailsCard({
           />
         )}
       </div>
+
+      {!selectedActivity ? <AgentEventsPanel events={detail.agentEvents} timezone={timezone} /> : null}
+    </>
+  );
+}
+
+function AgentEventsPanel({ events, timezone }: { events: VaDetail["agentEvents"]; timezone: string }) {
+  return (
+    <>
+      <SectionTitle eyebrow="Agent" title="Recent Agent Events" />
+      <div className="app-usage-list">
+        {events.length ? (
+          events.map((event) => (
+            <div className="app-usage-row" key={event.id}>
+              <span>
+                <strong>{humanizeAgentEvent(event.event_type)}</strong>
+                <small>
+                  {formatDateTimeFull(event.occurred_at, timezone)}
+                  {event.hostname ? ` on ${event.hostname}` : ""}
+                  {event.app_version ? `, v${event.app_version}` : ""}
+                </small>
+                <small>{event.message}</small>
+              </span>
+              <b>{event.severity}</b>
+            </div>
+          ))
+        ) : (
+          <EmptySmall icon={Monitor} title="No recent agent events" text="Login, connection, update, and recovery events will appear here." />
+        )}
+      </div>
     </>
   );
 }
@@ -801,6 +873,19 @@ function MetricCard({ label, tone, value }: { label: string; tone: string; value
       <strong>{value}</strong>
     </div>
   );
+}
+
+function humanizeAgentEvent(value: string) {
+  const mapping: Record<string, string> = {
+    force_reauth: "Admin required a fresh sign-in",
+    login_failed: "Login failed",
+    saved_session_restore_failed: "Saved session restore failed",
+    session_refresh_failed: "Session refresh failed",
+    tracking_started: "Tracking started",
+    update_failed: "Desktop update failed",
+    update_started: "Desktop update started",
+  };
+  return mapping[value] ?? value.replaceAll("_", " ");
 }
 
 function ActivityChart({

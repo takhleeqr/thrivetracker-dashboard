@@ -18,24 +18,29 @@ Use one of these:
 
 1. Copy `ThriveTracker.exe` to the clean Windows test profile.
 2. Double-click the `.exe`.
-3. Confirm no console/black terminal window appears.
-4. Sign in as a test VA.
-5. Check `Remember Me`.
-6. Start tracking on an assigned project.
-7. Wait for at least one activity log and one screenshot.
-8. Stop tracking.
-9. Close the app completely.
-10. Reopen the app.
-11. Confirm it restores the saved login without asking for password.
-12. Start tracking again.
-13. Confirm the dashboard shows the VA online.
-14. Restart Windows.
-15. Open the app again.
-16. Confirm Remember Me still works.
+3. Confirm the first screen asks to install the app on this PC.
+4. Click `Install now`.
+5. Confirm the app closes and reopens by itself.
+6. Confirm no console/black terminal window appears.
+7. Sign in as a test VA.
+8. Check `Remember Me`.
+9. Start tracking on an assigned project.
+10. Wait for at least one activity log and one screenshot.
+11. Stop tracking.
+12. Close the app completely.
+13. Reopen the app from the Start Menu shortcut.
+14. Confirm it restores the saved login without asking for password.
+15. Start tracking again.
+16. Confirm the dashboard shows the VA online.
+17. Restart Windows.
+18. Open the app again.
+19. Confirm Remember Me still works.
 
 ## Expected Results
 
 - The app opens without Python installed.
+- The app installs itself into `%LOCALAPPDATA%\Programs\ThriveTracker`.
+- The Start Menu shortcut opens the installed copy.
 - No console window appears.
 - The VA can sign in.
 - Assigned projects load.

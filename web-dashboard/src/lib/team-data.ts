@@ -28,6 +28,7 @@ export type ManagedVa = {
     last_login_at: string;
     last_seen_at: string | null;
   } | null;
+  latestAgentVersion: string | null;
 };
 
 export type VaFormInput = {
@@ -91,9 +92,15 @@ type UserDeviceRow = {
   last_seen_at: string | null;
 };
 
+type AgentHealthRow = {
+  user_id: string;
+  app_version: string | null;
+  last_health_ping_at: string;
+};
+
 export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ projects: TeamProjectOption[]; team: ManagedVa[] }> {
   const weekStart = startOfWeekIso();
-  const [profilesResult, entriesResult, projectsResult, assignmentsResult, devicesResult] = await Promise.all([
+  const [profilesResult, entriesResult, projectsResult, assignmentsResult, devicesResult, agentHealthResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id,full_name,email,is_active,created_at,last_seen_at,hourly_rate,expected_hours_per_week,schedule_type,shift_start_time,shift_end_time,working_days")
@@ -103,6 +110,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
     supabase.from("projects").select("id,name,is_active"),
     supabase.from("project_assignments").select("user_id,project_id"),
     supabase.from("user_devices").select("id,user_id,hostname,os_username,first_seen_at,last_login_at,last_seen_at"),
+    supabase.from("agent_health_snapshots").select("user_id,app_version,last_health_ping_at"),
   ]);
 
   if (profilesResult.error) throw profilesResult.error;
@@ -110,19 +118,29 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
   if (projectsResult.error) throw projectsResult.error;
   if (assignmentsResult.error) throw assignmentsResult.error;
   if (devicesResult.error) throw devicesResult.error;
+  if (agentHealthResult.error && agentHealthResult.error.code !== "42P01") throw agentHealthResult.error;
 
   const profiles = (profilesResult.data ?? []) as ProfileRow[];
   const entries = (entriesResult.data ?? []) as TimeEntryRow[];
   const assignments = (assignmentsResult.data ?? []) as AssignmentRow[];
   const projects = (projectsResult.data ?? []) as ProjectRow[];
   const devices = (devicesResult.data ?? []) as UserDeviceRow[];
+  const healthRows = (agentHealthResult.data ?? []) as AgentHealthRow[];
   const projectById = new Map(projects.map((project) => [project.id, project]));
   const latestDeviceByUser = new Map<string, UserDeviceRow>();
+  const latestVersionByUser = new Map<string, AgentHealthRow>();
 
   for (const device of devices) {
     const current = latestDeviceByUser.get(device.user_id);
     if (!current || latestDeviceTimestamp(device) > latestDeviceTimestamp(current)) {
       latestDeviceByUser.set(device.user_id, device);
+    }
+  }
+
+  for (const health of healthRows) {
+    const current = latestVersionByUser.get(health.user_id);
+    if (!current || new Date(health.last_health_ping_at).getTime() > new Date(current.last_health_ping_at).getTime()) {
+      latestVersionByUser.set(health.user_id, health);
     }
   }
 
@@ -157,6 +175,7 @@ export async function loadTeamManagement(supabase: SupabaseClient): Promise<{ pr
         shiftEndTime: profile.shift_end_time,
         workingDays: profile.working_days ?? [],
         lastDevice: latestDeviceByUser.get(profile.id) ?? null,
+        latestAgentVersion: latestVersionByUser.get(profile.id)?.app_version ?? null,
       };
     }),
     projects: projects.filter((project) => project.is_active).map((project) => ({ id: project.id, name: project.name })),

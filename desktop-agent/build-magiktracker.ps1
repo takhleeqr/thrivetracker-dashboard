@@ -10,12 +10,16 @@ $ErrorActionPreference = "Stop"
 $INIT_FILE   = ".\thrivetracker\__init__.py"
 $CONFIG_FILE = ".\thrivetracker\company_config.py"
 $OUTPUT_DIR  = "D:\programming\VaTrackers\MagikTracker"
+$INSTALLER_SCRIPT = ".\installer\TrackerInstaller.iss"
+$ISCC_PATH = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 
 # ------ 1. Read CURRENT version (no increment) ----------------
 $content = Get-Content $INIT_FILE -Raw
 $match   = [regex]::Match($content, '__version__ = "(\d+)\.(\d+)\.(\d+)"')
 $major   = [int]$match.Groups[1].Value
 $minor   = [int]$match.Groups[2].Value
+$patch   = [int]$match.Groups[3].Value
+$newFull = "$major.$minor.$patch"
 $newDisplay = "v$major.$minor"        # e.g.  v1.1
 
 Write-Host ""
@@ -25,7 +29,7 @@ Write-Host "============================================" -ForegroundColor Magen
 
 # ------ 2. Backup ThriveTracker config ------------------------
 $thriveConfig = Get-Content $CONFIG_FILE -Raw
-Write-Host "[1/5] ThriveTracker config backed up." -ForegroundColor Green
+Write-Host "[1/6] ThriveTracker config backed up." -ForegroundColor Green
 
 # ------ 3. Switch company_config.py to Magik ------------------
 $magikConfig = @"
@@ -37,14 +41,14 @@ APP_COMPANY_NAME = "Magik"
 APP_TIMEZONE = "Asia/Karachi"
 "@
 Set-Content $CONFIG_FILE $magikConfig -NoNewline
-Write-Host "[2/5] company_config.py switched to Magik." -ForegroundColor Green
+Write-Host "[2/6] company_config.py switched to Magik." -ForegroundColor Green
 
 # ------ 4. Run PyInstaller ------------------------------------
-Write-Host "[3/5] Running PyInstaller (this takes 5-10 min)..." -ForegroundColor Yellow
+Write-Host "[3/6] Running PyInstaller (this takes 5-10 min)..." -ForegroundColor Yellow
 try {
     & ".venv\Scripts\python.exe" -m PyInstaller ThriveTracker.spec --clean --noconfirm
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller exited with code $LASTEXITCODE" }
-    Write-Host "[3/5] Build complete." -ForegroundColor Green
+    Write-Host "[3/6] App build complete." -ForegroundColor Green
 } catch {
     # Always restore config even on failure
     Set-Content $CONFIG_FILE $thriveConfig -NoNewline
@@ -52,22 +56,49 @@ try {
     exit 1
 }
 
-# ------ 5. Copy to output folder ------------------------------
-New-Item -ItemType Directory -Force -Path $OUTPUT_DIR | Out-Null
-$destFile = "$OUTPUT_DIR\MagikTracker-$newDisplay.exe"
-Copy-Item "dist\ThriveTracker.exe" $destFile -Force
-Write-Host "[4/5] Saved: $destFile" -ForegroundColor Green
+# ------ 5. Build Windows installer ----------------------------
+if (-not (Test-Path $ISCC_PATH)) {
+    Set-Content $CONFIG_FILE $thriveConfig -NoNewline
+    Write-Host "ERROR: Inno Setup compiler not found at $ISCC_PATH. Config restored." -ForegroundColor Red
+    exit 1
+}
 
-# ------ 6. Restore ThriveTracker config -----------------------
+Write-Host "[4/6] Building Setup.exe installer..." -ForegroundColor Yellow
+try {
+    & $ISCC_PATH `
+        "/DMyAppName=MagikTracker" `
+        "/DMyAppVersion=$newFull" `
+        "/DMyAppPublisher=Magik" `
+        "/DMyAppExeName=ThriveTracker.exe" `
+        "/DMyAppSourceExe=$PSScriptRoot\dist\ThriveTracker.exe" `
+        "/DMyAppIconFile=$PSScriptRoot\assets\icon.ico" `
+        "/DMyAppOutputDir=$OUTPUT_DIR" `
+        "/DMyAppOutputBaseFilename=MagikTracker-Setup-$newDisplay" `
+        "/DMyAppId=MagikTrackerDesktop" `
+        $INSTALLER_SCRIPT
+    if ($LASTEXITCODE -ne 0) { throw "Installer build exited with code $LASTEXITCODE" }
+    Write-Host "[4/6] Setup.exe build complete." -ForegroundColor Green
+} catch {
+    Set-Content $CONFIG_FILE $thriveConfig -NoNewline
+    Write-Host "ERROR: Installer build failed. Config restored." -ForegroundColor Red
+    exit 1
+}
+
+# ------ 6. Confirm output path ------------------------------
+New-Item -ItemType Directory -Force -Path $OUTPUT_DIR | Out-Null
+$destFile = "$OUTPUT_DIR\MagikTracker-Setup-$newDisplay.exe"
+Write-Host "[5/6] Saved: $destFile" -ForegroundColor Green
+
+# ------ 7. Restore ThriveTracker config -----------------------
 Set-Content $CONFIG_FILE $thriveConfig -NoNewline
-Write-Host "[5/5] company_config.py restored to ThriveTracker." -ForegroundColor Green
+Write-Host "[6/6] company_config.py restored to ThriveTracker." -ForegroundColor Green
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Magenta
-Write-Host "  DONE!  MagikTracker-$newDisplay.exe" -ForegroundColor Magenta
+Write-Host "  DONE!  MagikTracker-Setup-$newDisplay.exe" -ForegroundColor Magenta
 Write-Host "  Saved to: $OUTPUT_DIR" -ForegroundColor Magenta
 Write-Host "============================================" -ForegroundColor Magenta
 Write-Host ""
 Write-Host "  Both builds are ready:" -ForegroundColor White
-Write-Host "  ThriveTracker: D:\programming\VaTrackers\ThriveTracker\ThriveTracker-$newDisplay.exe" -ForegroundColor White
-Write-Host "  MagikTracker:  D:\programming\VaTrackers\MagikTracker\MagikTracker-$newDisplay.exe" -ForegroundColor White
+Write-Host "  ThriveTracker: D:\programming\VaTrackers\ThriveTracker\ThriveTracker-Setup-$newDisplay.exe" -ForegroundColor White
+Write-Host "  MagikTracker:  D:\programming\VaTrackers\MagikTracker\MagikTracker-Setup-$newDisplay.exe" -ForegroundColor White

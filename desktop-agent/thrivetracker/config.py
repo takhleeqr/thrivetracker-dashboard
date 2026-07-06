@@ -18,9 +18,13 @@ class AppConfig:
     storage_bucket: str
     company_name: str
     timezone: str
+    minimum_desktop_version: str
+    desktop_update_download_url: str
+    desktop_update_required_message: str
     remembered_email: str
     remembered_access_token: str
     remembered_refresh_token: str
+    acknowledged_force_reauth_nonce: int
     screenshot_interval_minutes: int
     screenshot_quality: int
     max_screenshots_per_day: int
@@ -54,6 +58,12 @@ class AppConfig:
                 self.shift_start_reminder_delay_minutes,
             ),
             timezone=settings.get("timezone", self.timezone) or self.timezone,
+            minimum_desktop_version=settings.get("minimum_desktop_version", self.minimum_desktop_version) or "",
+            desktop_update_download_url=settings.get("desktop_update_download_url", self.desktop_update_download_url) or "",
+            desktop_update_required_message=(
+                settings.get("desktop_update_required_message", self.desktop_update_required_message)
+                or self.desktop_update_required_message
+            ),
         )
 
 
@@ -107,9 +117,16 @@ def get_config(paths: AppPaths) -> AppConfig:
         ),
         company_name=os.getenv("APP_COMPANY_NAME") or _company_value("APP_COMPANY_NAME", "ThriveTracker"),
         timezone=os.getenv("APP_TIMEZONE") or _company_value("APP_TIMEZONE", "UTC"),
+        minimum_desktop_version=local_config.get("minimum_desktop_version", ""),
+        desktop_update_download_url=local_config.get("desktop_update_download_url", ""),
+        desktop_update_required_message=local_config.get(
+            "desktop_update_required_message",
+            "A newer ThriveTracker version is required. Please install the latest build before continuing.",
+        ),
         remembered_email=local_config.get("email", ""),
         remembered_access_token=local_config.get("access_token", ""),
         remembered_refresh_token=local_config.get("refresh_token", ""),
+        acknowledged_force_reauth_nonce=_int_from_mapping(local_config, "acknowledged_force_reauth_nonce", 0),
         screenshot_interval_minutes=_int_from_env("SCREENSHOT_INTERVAL_MINUTES", 5),
         screenshot_quality=_int_from_env("SCREENSHOT_QUALITY", 60),
         max_screenshots_per_day=_int_from_env("MAX_SCREENSHOTS_PER_DAY", 200),

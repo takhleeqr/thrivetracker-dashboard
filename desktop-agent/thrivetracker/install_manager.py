@@ -1,0 +1,236 @@
+from dataclasses import dataclass
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import sys
+import textwrap
+from uuid import uuid4
+
+import httpx
+
+
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+@dataclass(frozen=True)
+class InstallContext:
+    app_name: str
+    is_frozen: bool
+    current_executable: Path | None
+    install_dir: Path
+    installed_executable: Path
+    start_menu_shortcut: Path
+    is_running_installed_copy: bool
+
+    @property
+    def can_self_manage(self) -> bool:
+        return self.is_frozen and self.current_executable is not None
+
+    @property
+    def needs_installation(self) -> bool:
+        return self.can_self_manage and not self.is_running_installed_copy
+
+
+def get_install_context(app_name: str) -> InstallContext:
+    local_appdata = Path(os.getenv("LOCALAPPDATA") or Path.home())
+    appdata = Path(os.getenv("APPDATA") or Path.home())
+    install_dir = local_appdata / "Programs" / app_name
+    installed_executable = install_dir / f"{app_name}.exe"
+    start_menu_shortcut = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / f"{app_name}.lnk"
+    current_executable = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+
+    return InstallContext(
+        app_name=app_name,
+        is_frozen=bool(getattr(sys, "frozen", False)),
+        current_executable=current_executable,
+        install_dir=install_dir,
+        installed_executable=installed_executable,
+        start_menu_shortcut=start_menu_shortcut,
+        is_running_installed_copy=_same_path(current_executable, installed_executable),
+    )
+
+
+def install_self(app_name: str) -> InstallContext:
+    context = get_install_context(app_name)
+    if not context.can_self_manage or not context.current_executable:
+        raise RuntimeError("Self-install is only available in the packaged desktop app.")
+
+    context.install_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(context.current_executable, context.installed_executable)
+    _create_start_menu_shortcut(context.installed_executable, context.start_menu_shortcut)
+    return get_install_context(app_name)
+
+
+def queue_launch_installed_copy(installed_executable: Path) -> None:
+    script = textwrap.dedent(
+        """
+        param(
+          [string]$TargetPath,
+          [int]$WaitPid
+        )
+
+        for ($i = 0; $i -lt 240; $i++) {
+          if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) {
+            break
+          }
+          Start-Sleep -Milliseconds 500
+        }
+
+        Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
+        """
+    ).strip()
+    _spawn_post_exit_script(script, [str(installed_executable), str(os.getpid())])
+
+
+def download_update_package(download_url: str, temp_dir: Path, app_name: str) -> Path:
+    if not download_url.strip():
+        raise RuntimeError("No update link is configured for this desktop app.")
+
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    destination = temp_dir / f"{app_name}-update-{uuid4().hex}.exe"
+
+    try:
+        with httpx.Client(follow_redirects=True, timeout=60.0) as client:
+            with client.stream("GET", download_url) as response:
+                response.raise_for_status()
+                with destination.open("wb") as handle:
+                    for chunk in response.iter_bytes():
+                        if chunk:
+                            handle.write(chunk)
+    except httpx.HTTPError as error:
+        raise RuntimeError("Could not download the latest desktop build. Check the connection and try again.") from error
+
+    if not destination.exists() or destination.stat().st_size <= 0:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError("The downloaded update file was empty.")
+
+    return destination
+
+
+def queue_replace_and_restart(downloaded_executable: Path, target_executable: Path) -> None:
+    target_executable.parent.mkdir(parents=True, exist_ok=True)
+    script = textwrap.dedent(
+        """
+        param(
+          [string]$SourcePath,
+          [string]$TargetPath,
+          [int]$WaitPid
+        )
+
+        for ($i = 0; $i -lt 240; $i++) {
+          if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) {
+            break
+          }
+          Start-Sleep -Milliseconds 500
+        }
+
+        $copied = $false
+        for ($i = 0; $i -lt 60; $i++) {
+          try {
+            Copy-Item -LiteralPath $SourcePath -Destination $TargetPath -Force
+            $copied = $true
+            break
+          } catch {
+            Start-Sleep -Seconds 1
+          }
+        }
+
+        if ($copied) {
+          Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
+          Remove-Item -LiteralPath $SourcePath -Force -ErrorAction SilentlyContinue
+        }
+        """
+    ).strip()
+    _spawn_post_exit_script(script, [str(downloaded_executable), str(target_executable), str(os.getpid())])
+
+
+def queue_run_installer_and_restart(installer_path: Path, installed_executable: Path) -> None:
+    installed_executable.parent.mkdir(parents=True, exist_ok=True)
+    script = textwrap.dedent(
+        """
+        param(
+          [string]$InstallerPath,
+          [string]$TargetPath,
+          [int]$WaitPid
+        )
+
+        for ($i = 0; $i -lt 240; $i++) {
+          if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) {
+            break
+          }
+          Start-Sleep -Milliseconds 500
+        }
+
+        Start-Process -FilePath $InstallerPath -ArgumentList '/VERYSILENT','/NORESTART','/SP-' -Wait -WindowStyle Hidden
+
+        for ($i = 0; $i -lt 60; $i++) {
+          if (Test-Path -LiteralPath $TargetPath) {
+            Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
+            break
+          }
+          Start-Sleep -Seconds 1
+        }
+
+        Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
+        """
+    ).strip()
+    _spawn_post_exit_script(script, [str(installer_path), str(installed_executable), str(os.getpid())])
+
+
+def _create_start_menu_shortcut(target_executable: Path, shortcut_path: Path) -> None:
+    shortcut_path.parent.mkdir(parents=True, exist_ok=True)
+    command = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        "$sc = $ws.CreateShortcut($args[1]); "
+        "$sc.TargetPath = $args[0]; "
+        "$sc.WorkingDirectory = Split-Path -Parent $args[0]; "
+        "$sc.IconLocation = \"$($args[0]),0\"; "
+        "$sc.Save()"
+    )
+    subprocess.run(
+        [
+            _powershell_executable(),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+            str(target_executable),
+            str(shortcut_path),
+        ],
+        check=False,
+        creationflags=CREATE_NO_WINDOW,
+    )
+
+
+def _spawn_post_exit_script(script_body: str, args: list[str]) -> None:
+    script_path = Path(os.getenv("TEMP") or Path.cwd()) / f"thrivetracker-post-exit-{uuid4().hex}.ps1"
+    script_path.write_text(script_body, encoding="utf-8")
+    subprocess.Popen(
+        [
+            _powershell_executable(),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-File",
+            str(script_path),
+            *args,
+        ],
+        creationflags=CREATE_NO_WINDOW,
+        close_fds=False,
+    )
+
+
+def _powershell_executable() -> str:
+    windir = os.getenv("WINDIR", r"C:\Windows")
+    return str(Path(windir) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+
+
+def _same_path(left: Path | None, right: Path | None) -> bool:
+    if left is None or right is None:
+        return False
+
+    return str(left.resolve()).casefold() == str(right.resolve()).casefold()

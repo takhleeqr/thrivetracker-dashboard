@@ -261,6 +261,7 @@ export default function TeamPage() {
                         <>
                           <strong>{va.lastDevice.hostname}</strong>
                           <small>{va.lastDevice.os_username ? `Windows user: ${va.lastDevice.os_username}` : "Windows user unavailable"}</small>
+                          <small>{va.latestAgentVersion ? `Agent v${va.latestAgentVersion}` : "Agent version unknown"}</small>
                         </>
                       ) : (
                         "No device yet"

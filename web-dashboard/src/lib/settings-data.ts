@@ -4,11 +4,14 @@ export type AppSettings = {
   app_categories_unproductive: string;
   connectivity_grace_minutes: string;
   data_retention_days: string;
+  desktop_update_download_url: string;
+  desktop_update_required_message: string;
   idle_timeout_minutes: string;
   late_start_time: string;
   low_activity_minimum_minutes: string;
   low_activity_threshold: string;
   max_screenshots_per_day: string;
+  minimum_desktop_version: string;
   offline_queue_alert_count: string;
   offline_queue_alert_minutes: string;
   restart_loop_alert_count: string;
@@ -25,11 +28,14 @@ export const defaultSettings: AppSettings = {
   app_categories_unproductive: "[]",
   connectivity_grace_minutes: "10",
   data_retention_days: "90",
+  desktop_update_download_url: "",
+  desktop_update_required_message: "A newer ThriveTracker version is required. Please install the latest build before continuing.",
   idle_timeout_minutes: "5",
   late_start_time: "10:00",
   low_activity_minimum_minutes: "15",
   low_activity_threshold: "30",
   max_screenshots_per_day: "200",
+  minimum_desktop_version: "",
   offline_queue_alert_count: "5",
   offline_queue_alert_minutes: "10",
   restart_loop_alert_count: "3",
@@ -83,6 +89,7 @@ function validateSettings(settings: AppSettings) {
   ensureNumber(settings.restart_loop_alert_count, "Restart loop alert count", 2, 25);
   ensureNumber(settings.screenshot_failure_alert_minutes, "Screenshot failure alert age", 1, 240);
   ensureNumber(settings.shift_start_reminder_delay_minutes, "Shift reminder delay", 1, 180);
+  validateOptionalSemver(settings.minimum_desktop_version, "Minimum desktop version");
   validateJsonArray(settings.app_categories_unproductive, "Unproductive app categories");
 }
 
@@ -98,11 +105,14 @@ function descriptionForKey(key: string): string {
     app_categories_unproductive: "JSON array of app names marked as unproductive",
     connectivity_grace_minutes: "Minutes to allow brief connection loss before tracked time is stopped",
     data_retention_days: "Auto-delete screenshots older than this",
+    desktop_update_download_url: "Download URL shown when a desktop agent update is required",
+    desktop_update_required_message: "Message shown when a desktop agent update is required",
     idle_timeout_minutes: "Minutes of no activity before auto-pause",
     late_start_time: "Scheduled-day time after which missing VAs are marked late",
     low_activity_minimum_minutes: "Consecutive low-activity minutes before alert fires",
     low_activity_threshold: "Activity percent below this triggers alerts",
     max_screenshots_per_day: "Safety cap per VA per day",
+    minimum_desktop_version: "Minimum desktop agent version required before tracking can continue",
     offline_queue_alert_count: "Queued sync items before an admin alert fires",
     offline_queue_alert_minutes: "Minutes the oldest queued sync item can remain before an admin alert fires",
     restart_loop_alert_count: "App launches within one shift before a restart-loop alert fires",
@@ -116,6 +126,14 @@ function descriptionForKey(key: string): string {
   };
 
   return descriptions[key] ?? key;
+}
+
+function validateOptionalSemver(value: string, label: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  if (!/^\d+\.\d+\.\d+$/.test(trimmed)) {
+    throw new Error(`${label} must look like 1.5.0.`);
+  }
 }
 
 function validateJsonArray(value: string, label: string) {

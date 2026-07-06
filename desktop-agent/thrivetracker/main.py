@@ -57,11 +57,11 @@ class DesktopApp:
         for child in self.root.winfo_children():
             child.destroy()
 
-    def show_login(self) -> None:
+    def show_login(self, notice: str = "") -> None:
         self.clear()
         self.config = get_config(self.paths)
         LOGGER.info("Showing login window for desktop agent v%s", __version__)
-        LoginWindow(self.root, self.paths, self.config, self.show_main)
+        LoginWindow(self.root, self.paths, self.config, self.show_main, initial_notice=notice)
 
     def show_main(self, user: AuthenticatedUser) -> None:
         self.clear()
@@ -79,6 +79,7 @@ class DesktopApp:
             self.set_tray_state,
             self.set_tray_resume_ready,
             self.logout_to_login,
+            self.exit_app,
         )
         self._start_tray()
         self.main_window.refresh_external_state()
@@ -117,11 +118,11 @@ class DesktopApp:
         if self.main_window:
             self.main_window.request_logout()
 
-    def logout_to_login(self) -> None:
+    def logout_to_login(self, notice: str = "") -> None:
         self.main_window = None
         self.set_tray_resume_ready(False)
         self.set_tray_state("stopped")
-        self.show_login()
+        self.show_login(notice)
         self.show_window()
 
     def set_tray_state(self, state: str) -> None:
@@ -136,13 +137,17 @@ class DesktopApp:
         if self.tray:
             self.tray.notify(message, title)
 
+    def exit_app(self) -> None:
+        if self.tray:
+            self.tray.stop()
+            self.tray = None
+        self.app_lock.release()
+        self.root.destroy()
+
     def quit_from_tray(self) -> None:
         if self.main_window:
             self.main_window.stop_for_app_close()
-        if self.tray:
-            self.tray.stop()
-        self.app_lock.release()
-        self.root.destroy()
+        self.exit_app()
 
 
 def main() -> int:

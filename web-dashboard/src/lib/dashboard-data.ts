@@ -106,6 +106,7 @@ export type TimeEntryWithMetrics = TimeEntry & {
 export type VaDetail = {
   profile: Profile;
   lastDevice: UserDevice | null;
+  latestAgentHealth: AgentHealthSnapshot | null;
   totalHoursTodaySeconds: number;
   totalHoursWeekSeconds: number;
   totalHoursMonthSeconds: number;
@@ -119,6 +120,7 @@ export type VaDetail = {
   screenshots: Screenshot[];
   activityLogs: ActivityLog[];
   appUsage: AppUsage[];
+  agentEvents: AgentEvent[];
   dailyPay: Array<{ date: string; earnings: number; seconds: number }>;
   projectOptions: Project[];
   timeEntries: TimeEntryWithMetrics[];
@@ -187,6 +189,8 @@ type PersistedDashboardAlert = {
 type AgentHealthSnapshot = {
   user_id: string;
   install_id: string;
+  hostname: string | null;
+  app_version: string | null;
   queue_size: number;
   oldest_queue_item_at: string | null;
   screenshot_failure_started_at: string | null;
@@ -198,6 +202,20 @@ type AgentHealthSnapshot = {
 type AgentAppLaunchEvent = {
   user_id: string;
   launched_at: string;
+  app_version?: string | null;
+};
+
+export type AgentEvent = {
+  id: string;
+  user_id: string;
+  install_id: string | null;
+  hostname: string | null;
+  app_version: string | null;
+  event_type: string;
+  severity: "info" | "warning" | "error" | "critical";
+  message: string;
+  details: Record<string, unknown> | null;
+  occurred_at: string;
 };
 
 export type DashboardSummary = {
@@ -301,10 +319,10 @@ export async function loadDashboardSummary(
       .eq("is_active", true),
     supabase
       .from("agent_health_snapshots")
-      .select("user_id,install_id,queue_size,oldest_queue_item_at,screenshot_failure_started_at,screenshot_failure_count,last_screenshot_uploaded_at,last_health_ping_at"),
+      .select("user_id,install_id,hostname,app_version,queue_size,oldest_queue_item_at,screenshot_failure_started_at,screenshot_failure_count,last_screenshot_uploaded_at,last_health_ping_at"),
     supabase
       .from("agent_app_launch_events")
-      .select("user_id,launched_at")
+      .select("user_id,launched_at,app_version")
       .gte("launched_at", todayStart),
   ]);
 
@@ -448,7 +466,7 @@ export async function loadVaDetail(
 ): Promise<VaDetail> {
   const selectedRange = range ?? { start: startOfTodayIso(timezone), end: new Date().toISOString() };
 
-  const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult, userDevicesResult] = await Promise.all([
+  const [profileResult, projectsResult, assignmentsResult, entriesResult, activityResult, screenshotsResult, userDevicesResult, agentHealthResult, agentEventsResult] = await Promise.all([
     supabase
       .from("profiles")
       .select("id,email,full_name,role,is_active,last_seen_at,hourly_rate,schedule_type,shift_start_time,shift_end_time,working_days")
@@ -486,6 +504,20 @@ export async function loadVaDetail(
       .from("user_devices")
       .select("id,user_id,hostname,os_username,first_seen_at,last_login_at,last_seen_at")
       .eq("user_id", userId),
+    supabase
+      .from("agent_health_snapshots")
+      .select("user_id,install_id,hostname,app_version,queue_size,oldest_queue_item_at,screenshot_failure_started_at,screenshot_failure_count,last_screenshot_uploaded_at,last_health_ping_at")
+      .eq("user_id", userId)
+      .order("last_health_ping_at", { ascending: false })
+      .limit(1),
+    supabase
+      .from("agent_events")
+      .select("id,user_id,install_id,hostname,app_version,event_type,severity,message,details,occurred_at")
+      .eq("user_id", userId)
+      .gte("occurred_at", selectedRange.start)
+      .lte("occurred_at", selectedRange.end)
+      .order("occurred_at", { ascending: false })
+      .limit(50),
   ]);
 
   if (profileResult.error) throw profileResult.error;
@@ -495,6 +527,8 @@ export async function loadVaDetail(
   if (activityResult.error) throw activityResult.error;
   if (screenshotsResult.error) throw screenshotsResult.error;
   if (userDevicesResult.error) throw userDevicesResult.error;
+  if (agentHealthResult.error) throw agentHealthResult.error;
+  if (agentEventsResult.error) throw agentEventsResult.error;
   if (!profileResult.data) throw new Error("VA profile was not found.");
 
   const profile = profileResult.data as Profile;
@@ -504,6 +538,8 @@ export async function loadVaDetail(
   const activityLogs = (activityResult.data ?? []) as ActivityLog[];
   const screenshotRows = (screenshotsResult.data ?? []) as Omit<Screenshot, "signedUrl">[];
   const userDevices = (userDevicesResult.data ?? []) as UserDevice[];
+  const latestAgentHealth = ((agentHealthResult.data ?? []) as AgentHealthSnapshot[])[0] ?? null;
+  const agentEvents = (agentEventsResult.data ?? []) as AgentEvent[];
   const screenshots = await addSignedScreenshotUrls(supabase, screenshotRows.slice(0, 60));
   const screenshotsForMetrics = screenshotRows.map((screenshot) => ({ ...screenshot, signedUrl: null }));
   const projectNames = new Map(projects.map((project) => [project.id, project.name]));
@@ -521,6 +557,7 @@ export async function loadVaDetail(
   return {
     profile,
     lastDevice,
+    latestAgentHealth,
     totalHoursTodaySeconds: totalSecondsInRange(entries, selectedRange, Date.now(), profile.last_seen_at, status, connectivityGraceMinutes),
     totalHoursWeekSeconds: weekSeconds,
     totalHoursMonthSeconds: monthSeconds,
@@ -534,6 +571,7 @@ export async function loadVaDetail(
     screenshots,
     activityLogs,
     appUsage: buildAppUsage(activityLogs),
+    agentEvents,
     dailyPay: buildDailyPay(entries, selectedRange, timezone, hourlyRate, Date.now(), profile.last_seen_at, status, connectivityGraceMinutes),
     projectOptions: projects
       .filter((project) => project.is_active !== false && assignedProjectIds.has(project.id))

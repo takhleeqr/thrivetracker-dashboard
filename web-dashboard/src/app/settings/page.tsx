@@ -180,6 +180,29 @@ export default function SettingsPage() {
                 value={settings.shift_start_reminder_delay_minutes}
               />
             </SettingField>
+            <SettingField label="Minimum desktop version">
+              <Input
+                onChange={(event) => updateSetting("minimum_desktop_version", event.target.value)}
+                placeholder="1.5.0"
+                type="text"
+                value={settings.minimum_desktop_version}
+              />
+            </SettingField>
+            <SettingField label="Update download URL">
+              <Input
+                onChange={(event) => updateSetting("desktop_update_download_url", event.target.value)}
+                placeholder="https://..."
+                type="url"
+                value={settings.desktop_update_download_url}
+              />
+            </SettingField>
+            <SettingField label="Update required message">
+              <Input
+                onChange={(event) => updateSetting("desktop_update_required_message", event.target.value)}
+                type="text"
+                value={settings.desktop_update_required_message}
+              />
+            </SettingField>
           </Card>
 
           <Card className="detail-card settings-card">

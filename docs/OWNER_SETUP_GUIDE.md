@@ -27,10 +27,12 @@ Use Supabase Storage for storing screenshots.
 - Website: https://supabase.com/dashboard
 - Product path inside Supabase: `Storage`
 - Create a private bucket named `screenshots`.
+- Create a public bucket named `desktop-downloads` later for installer updates.
 
 You need to collect these values:
 
 - Bucket name: `screenshots`
+- Update bucket name later: `desktop-downloads`
 
 ### 3. Vercel
 
@@ -200,7 +202,20 @@ on conflict do nothing;
 5. Open `SQL Editor`.
 6. Run `supabase/storage/001_screenshots_bucket_policies.sql`.
 
-### Step 3: Confirm `.env`
+### Step 3: Create Desktop Downloads Bucket
+
+1. In the same Supabase project, go to `Storage`.
+2. Click `New bucket`.
+3. Bucket name: `desktop-downloads`.
+4. Make this bucket public.
+5. Create the bucket.
+6. Inside the bucket, create a folder named after the app for that company:
+   - `ThriveTracker`
+   - `MagikTracker`
+7. This bucket is only for installer files.
+8. Do not put screenshots inside this bucket.
+
+### Step 4: Confirm `.env`
 
 Make sure `.env` contains:
 
@@ -208,7 +223,7 @@ Make sure `.env` contains:
 SUPABASE_STORAGE_BUCKET=screenshots
 ```
 
-### Step 4: Tell Me When Done
+### Step 5: Tell Me When Done
 
 When you finish Supabase setup and Storage bucket setup, send me:
 
@@ -216,6 +231,7 @@ When you finish Supabase setup and Storage bucket setup, send me:
 - Whether your Supabase keys are `publishable/secret` or `anon/service_role`
 - Confirmation that the SQL migration ran successfully
 - Confirmation that the `screenshots` bucket exists
+- Confirmation that the `desktop-downloads` bucket exists
 - Do not send secret keys in chat
 
 ## What I Can Do After You Finish These Steps
@@ -242,4 +258,5 @@ When you finish Supabase setup and Storage bucket setup, send me:
 - [ ] Test VAs assigned to projects.
 - [ ] Supabase Storage bucket `screenshots` created.
 - [ ] Supabase Storage bucket policies SQL ran successfully.
+- [ ] Supabase Storage bucket `desktop-downloads` created.
 - [ ] `SUPABASE_STORAGE_BUCKET=screenshots` added to `.env`.

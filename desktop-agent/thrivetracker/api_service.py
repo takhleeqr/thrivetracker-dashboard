@@ -54,6 +54,16 @@ class SessionSnapshot:
 
 
 @dataclass(frozen=True)
+class AgentRuntimeState:
+    force_reauth_nonce: int
+    force_reauth_reason: str | None
+    force_reauth_requested_at: datetime | None
+    minimum_desktop_version: str
+    desktop_update_download_url: str
+    desktop_update_required_message: str
+
+
+@dataclass(frozen=True)
 class VaSchedule:
     schedule_type: str
     shift_start_time: str | None
@@ -338,18 +348,35 @@ class SupabaseApiService:
             working_days=list(working_days) if isinstance(working_days, list) else [],
         )
 
-    def record_app_launch(self, install_id: str, hostname: str) -> None:
+    def get_agent_runtime_state(self) -> AgentRuntimeState:
+        rows = self._request(
+            "GET",
+            "/rest/v1/rpc/get_agent_runtime_state",
+        ) or []
+        row = rows[0] if isinstance(rows, list) and rows else rows or {}
+        return AgentRuntimeState(
+            force_reauth_nonce=int(row.get("force_reauth_nonce") or 0),
+            force_reauth_reason=row.get("force_reauth_reason"),
+            force_reauth_requested_at=_parse_supabase_datetime(row["force_reauth_requested_at"]) if row.get("force_reauth_requested_at") else None,
+            minimum_desktop_version=row.get("minimum_desktop_version") or "",
+            desktop_update_download_url=row.get("desktop_update_download_url") or "",
+            desktop_update_required_message=row.get("desktop_update_required_message")
+            or "A newer ThriveTracker version is required. Please install the latest build before continuing.",
+        )
+
+    def record_app_launch(self, install_id: str, hostname: str, app_version: str) -> None:
         self._request(
             "POST",
             "/rest/v1/rpc/record_agent_app_launch",
             json={
                 "p_install_id": install_id,
                 "p_hostname": hostname,
+                "p_app_version": app_version,
             },
             prefer="return=minimal",
         )
 
-    def record_heartbeat(self, install_id: str, health: dict | None = None) -> None:
+    def record_heartbeat(self, install_id: str, app_version: str, health: dict | None = None) -> None:
         payload = {
             "p_install_id": install_id,
             "p_queue_size": int(health.get("queue_size", 0)) if health else 0,
@@ -358,6 +385,7 @@ class SupabaseApiService:
             "p_screenshot_failure_count": int(health.get("screenshot_failure_count", 0)) if health else 0,
             "p_last_screenshot_uploaded_at": health.get("last_screenshot_uploaded_at") if health else None,
             "p_hostname": health.get("hostname") if health else None,
+            "p_app_version": app_version,
         }
         try:
             self._request(
@@ -375,6 +403,33 @@ class SupabaseApiService:
                 json={"p_install_id": install_id},
                 prefer="return=minimal",
             )
+
+    def record_agent_event(
+        self,
+        install_id: str | None,
+        hostname: str | None,
+        app_version: str,
+        event_type: str,
+        message: str,
+        occurred_at: str | None = None,
+        severity: str = "info",
+        details: dict | None = None,
+    ) -> None:
+        self._request(
+            "POST",
+            "/rest/v1/rpc/record_agent_event",
+            json={
+                "p_install_id": install_id,
+                "p_hostname": hostname,
+                "p_app_version": app_version,
+                "p_event_type": event_type,
+                "p_message": message,
+                "p_occurred_at": occurred_at,
+                "p_severity": severity,
+                "p_details": details or {},
+            },
+            prefer="return=minimal",
+        )
 
     def _request(
         self,

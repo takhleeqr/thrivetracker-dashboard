@@ -144,53 +144,76 @@ Expected result:
 
 `activeAlerts` can be more than `0` if a VA is late, no-show, low activity, sync delayed, failing screenshot sync, building queue backlog, or relaunching repeatedly.
 
-## Step 7: Build Desktop Agent For Production
+## Step 7: Build Desktop Agent Installer For Production
 
 On your Windows machine:
 
 ```cmd
 cd "C:\Users\NABEEL KAMBOH\Documents\ThriveTracker\desktop-agent"
-".venv\Scripts\python.exe" -m PyInstaller ThriveTracker.spec --clean --noconfirm
+.\build-thrivetracker.ps1
 ```
 
-The `.exe` will be created under:
+This creates the proper Windows installer file:
 
 ```text
-desktop-agent\dist
+D:\programming\VaTrackers\ThriveTracker\ThriveTracker-Setup-vX.Y.exe
 ```
+
+The raw app EXE still exists inside `desktop-agent\dist`, but that file is an internal build artifact. VAs should receive the `Setup.exe`, not the raw EXE.
 
 Before giving it to VAs, test it yourself:
 
-1. Open the `.exe`.
-2. Log in as a VA.
-3. Start timer.
-4. Wait for activity and screenshots.
-5. Trigger an idle pause and confirm the timer stops cleanly.
-6. Simulate a short internet drop and confirm the timer stops after the grace period, not instantly.
-7. Reopen after a crash and confirm valid session recovery behaves correctly.
-8. Stop timer and confirm the production dashboard updates.
+1. Open the `Setup.exe`.
+2. Install the app.
+3. Open the installed app from Start Menu.
+4. Log in as a VA.
+5. Start timer.
+6. Wait for activity and screenshots.
+7. Trigger an idle pause and confirm the timer stops cleanly.
+8. Simulate a short internet drop and confirm the timer stops after the grace period, not instantly.
+9. Reopen after a crash and confirm valid session recovery behaves correctly.
+10. Stop timer and confirm the production dashboard updates.
 
-## Step 8: Give VAs The App
+## Step 8: Upload The Installer For Future Updates
+
+In the same Supabase project:
+
+1. Go to `Storage`.
+2. Open the public `desktop-downloads` bucket.
+3. Create or open the `ThriveTracker` folder.
+4. Upload the newest `ThriveTracker-Setup-vX.Y.exe`.
+5. Copy the public file URL.
+6. Open the production dashboard.
+7. Go to `Settings`.
+8. Paste the link into `Update download URL`.
+9. Save.
+
+If you want to force users onto that build:
+
+10. Set `Minimum desktop version`.
+11. Save again.
+
+## Step 9: Give VAs The App
 
 For each VA:
 
 1. Create their account from the Team page.
 2. Assign them only their projects.
 3. Set hourly rate, expected weekly hours, and working days.
-4. Send them the `.exe`.
+4. Send them the `Setup.exe`.
 5. Give them their email and password.
 6. Tell them to start/stop the tracker during work only.
 
-## Step 9: What To Check Daily
+## Step 10: What To Check Daily
 
 Managers should check:
 
 - Overview page for `Needs Attention`.
 - Overview page for `Sync Delayed` or health-related alerts.
-- VA Detail page for screenshots, apps, timeline, and breaks.
+- VA Detail page for screenshots, apps, timeline, breaks, and recent agent events.
 - Reports page for payroll and Excel exports.
 - Team page for active/inactive VAs, expected hours, and any inactive project assignments that still need cleanup.
-- Settings page for timezone, thresholds, and unproductive apps.
+- Settings page for timezone, thresholds, update URL, minimum version, and unproductive apps.
 
 ## If Something Breaks
 

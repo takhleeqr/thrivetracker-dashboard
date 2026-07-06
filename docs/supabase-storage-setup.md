@@ -15,6 +15,33 @@ Screenshots are stored in Supabase Storage.
 SUPABASE_STORAGE_BUCKET=screenshots
 ```
 
+## Separate Bucket For Desktop App Downloads
+
+Do not use the private `screenshots` bucket for app updates.
+
+Create a second bucket for installer files only:
+
+1. In each company's Supabase project, go to `Storage`.
+2. Create a bucket named `desktop-downloads`.
+3. Make this bucket public.
+4. Inside it, create a folder for that company's app:
+   - `ThriveTracker`
+   - `MagikTracker`
+5. Upload only installer files there, for example:
+
+```text
+ThriveTracker/ThriveTracker-Setup-v1.6.exe
+MagikTracker/MagikTracker-Setup-v1.6.exe
+```
+
+6. Copy the public file URL.
+7. Paste that URL into the matching dashboard `Settings` page under `Update download URL`.
+
+Keep screenshots and installers separate:
+
+- `screenshots` bucket: private, screenshot files only
+- `desktop-downloads` bucket: public, installer files only
+
 ## Screenshot Path Format
 
 Use this object path format:

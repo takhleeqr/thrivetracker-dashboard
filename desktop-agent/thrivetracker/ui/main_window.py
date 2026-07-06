@@ -1,18 +1,21 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from collections.abc import Callable
 import threading
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
+import webbrowser
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .. import __app_name__, __version__
 from ..activity_tracker import ActivitySnapshot, ActivityTracker
-from ..api_service import ApiError, Project, RangeTimeEntry, SessionSnapshot, SupabaseApiService, TimeEntry, VaSchedule
+from ..api_service import AgentRuntimeState, ApiError, Project, RangeTimeEntry, SessionSnapshot, SupabaseApiService, TimeEntry, VaSchedule
 from ..app_paths import AppPaths
 from ..device_identity import DeviceIdentity
 from ..auth_service import AuthenticatedUser
 from ..config import AppConfig, save_local_config
+from ..install_manager import download_update_package, get_install_context, queue_replace_and_restart, queue_run_installer_and_restart
 from ..offline_queue import OfflineQueue, QueueItem
 from ..session_state import PersistedSessionState, SessionStateStore
 from ..screenshot_service import CapturedScreenshot, ScreenshotService
@@ -52,7 +55,8 @@ class MainWindow(ttk.Frame):
         on_notify: Callable[[str, str | None], None] | None = None,
         on_tray_state_change: Callable[[str], None] | None = None,
         on_tray_resume_change: Callable[[bool], None] | None = None,
-        on_logout: Callable[[], None] | None = None,
+        on_logout: Callable[[str], None] | None = None,
+        on_app_exit: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(root, padding=24)
         self.root = root
@@ -65,6 +69,7 @@ class MainWindow(ttk.Frame):
         self.on_tray_state_change = on_tray_state_change
         self.on_tray_resume_change = on_tray_resume_change
         self.on_logout = on_logout
+        self.on_app_exit = on_app_exit
         self.api = SupabaseApiService(
             config.supabase_url,
             config.supabase_anon_key,
@@ -74,6 +79,7 @@ class MainWindow(ttk.Frame):
         self.screenshots = ScreenshotService(temp_dir, config.screenshot_quality)
         self.offline_queue = OfflineQueue(queue_dir / "offline_queue.sqlite3")
         self.session_state = SessionStateStore(paths.session_state_file)
+        self.install_context = get_install_context(__app_name__)
 
         self.projects: list[Project] = []
         self.va_schedule = VaSchedule(schedule_type="flexible", shift_start_time=None, shift_end_time=None, working_days=[])
@@ -107,6 +113,9 @@ class MainWindow(ttk.Frame):
         self.screenshot_failure_started_at: datetime | None = None
         self.screenshot_failure_count = 0
         self.last_screenshot_uploaded_at: datetime | None = None
+        self.acknowledged_force_reauth_nonce = config.acknowledged_force_reauth_nonce
+        self.is_handling_session_failure = False
+        self.is_updating = False
 
         self.project_var = tk.StringVar()
         self.timer_text = tk.StringVar(value="00:00:00")
@@ -185,6 +194,198 @@ class MainWindow(ttk.Frame):
             "last_screenshot_uploaded_at": self.last_screenshot_uploaded_at.isoformat() if self.last_screenshot_uploaded_at else None,
         }
 
+    def _apply_runtime_state(self, runtime_state: AgentRuntimeState, is_initial: bool = False) -> None:
+        self.config = replace(
+            self.config,
+            minimum_desktop_version=runtime_state.minimum_desktop_version,
+            desktop_update_download_url=runtime_state.desktop_update_download_url,
+            desktop_update_required_message=runtime_state.desktop_update_required_message,
+        )
+
+        if runtime_state.force_reauth_nonce > self.acknowledged_force_reauth_nonce:
+            if is_initial and self.user.session_origin == "password":
+                self._acknowledge_force_reauth_nonce(runtime_state.force_reauth_nonce)
+            else:
+                self._acknowledge_force_reauth_nonce(runtime_state.force_reauth_nonce)
+                self._force_reauthentication(runtime_state.force_reauth_reason)
+                return
+
+        if self._is_update_required():
+            self._set_update_required_state()
+
+    def _acknowledge_force_reauth_nonce(self, nonce: int) -> None:
+        self.acknowledged_force_reauth_nonce = max(self.acknowledged_force_reauth_nonce, nonce)
+        self._save_local_config_tokens()
+
+    def _is_update_required(self) -> bool:
+        return _compare_versions(__version__, self.config.minimum_desktop_version) < 0
+
+    def _set_update_required_state(self) -> None:
+        download_hint = f" Download: {self.config.desktop_update_download_url}" if self.config.desktop_update_download_url else ""
+        self.status_text.set("Update required")
+        self.tracking_state_text.set("Install the latest desktop build")
+        self.error_text.set(f"{self.config.desktop_update_required_message}{download_hint}")
+        if not self.active_entry and not self.break_started_at:
+            self.toggle_button.configure(state="disabled")
+            self.break_button.configure(state="disabled")
+        self._set_tray_state("attention")
+        self._refresh_update_button()
+
+    def _refresh_update_button(self) -> None:
+        state = "normal" if self.config.desktop_update_download_url else "disabled"
+        label = "Update Now" if self.install_context.can_self_manage and self.install_context.is_running_installed_copy else "Get Update"
+        self.update_button.configure(text=label)
+        self.update_button.configure(state=state)
+
+    def _open_update_download(self) -> None:
+        if not self.config.desktop_update_download_url:
+            return
+        if self.is_updating:
+            return
+        if self.active_entry or self.break_started_at or self.break_resume_project_id:
+            self.error_text.set("Stop the current session before installing an update.")
+            return
+        if self.install_context.can_self_manage and self.install_context.is_running_installed_copy:
+            self.is_updating = True
+            self.error_text.set("")
+            self._set_busy(True, "Downloading update...")
+            threading.Thread(target=self._install_update_worker, daemon=True).start()
+            return
+        webbrowser.open(self.config.desktop_update_download_url)
+
+    def _install_update_worker(self) -> None:
+        try:
+            downloaded_file = download_update_package(
+                self.config.desktop_update_download_url,
+                self.paths.temp_dir,
+                __app_name__,
+            )
+            if "setup" in downloaded_file.name.lower():
+                queue_run_installer_and_restart(downloaded_file, self.install_context.installed_executable)
+            else:
+                queue_replace_and_restart(downloaded_file, self.install_context.installed_executable)
+            self._record_agent_event(
+                "update_started",
+                "Downloaded the latest desktop update and scheduled an automatic restart.",
+                details={"download_url": self.config.desktop_update_download_url},
+            )
+            self.root.after(0, self._finish_update_handoff)
+        except Exception as error:
+            self._record_agent_event("update_failed", str(error), severity="error")
+            self.root.after(0, lambda: self._finish_update_error(str(error)))
+
+    def _finish_update_handoff(self) -> None:
+        self.status_text.set("Updating...")
+        self.tracking_state_text.set("The app will reopen in a moment")
+        self.error_text.set("Installing the latest desktop build.")
+        self.root.after(350, self._exit_for_update_restart)
+
+    def _finish_update_error(self, message: str) -> None:
+        self.is_updating = False
+        self.error_text.set(message)
+        self._set_busy(False)
+        self.refresh_external_state()
+
+    def _exit_for_update_restart(self) -> None:
+        self._cancel_screenshot_schedule()
+        self._cancel_idle_check()
+        self._cancel_settings_sync()
+        self._cancel_shift_reminder_check()
+        self._cancel_heartbeat()
+        self._cancel_connectivity_restore_check()
+        if self.queue_after_id:
+            self.root.after_cancel(self.queue_after_id)
+            self.queue_after_id = None
+        self._stop_activity_tracking()
+        self._set_tray_state("stopped")
+        if self.on_app_exit:
+            self.on_app_exit()
+            return
+        self.root.destroy()
+
+    def _record_agent_event(self, event_type: str, message: str, severity: str = "info", details: dict | None = None) -> None:
+        payload = {
+            "install_id": self.device.install_id,
+            "hostname": self.device.hostname,
+            "app_version": __version__,
+            "event_type": event_type,
+            "severity": severity,
+            "message": message,
+            "details": details or {},
+            "occurred_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self.api.record_agent_event(
+                install_id=payload["install_id"],
+                hostname=payload["hostname"],
+                app_version=payload["app_version"],
+                event_type=payload["event_type"],
+                message=payload["message"],
+                occurred_at=payload["occurred_at"],
+                severity=payload["severity"],
+                details=payload["details"],
+            )
+        except Exception:
+            self._try_enqueue("agent_event", payload)
+
+    def _force_reauthentication(self, reason: str | None = None) -> None:
+        message = reason or "An admin asked you to sign in again."
+        self._record_agent_event("force_reauth", message, severity="warning")
+        self._queue_active_session_stop_for_reauth()
+        self._finish_logout(message)
+        self._notify_user(message, "ThriveTracker")
+
+    def _is_auth_session_error(self, message: str) -> bool:
+        lowered = message.lower()
+        return (
+            "sign in again" in lowered
+            or "refresh supabase login session" in lowered
+            or "login session cannot be refreshed" in lowered
+            or "saved login expired" in lowered
+        )
+
+    def _handle_auth_session_failure(self, message: str) -> None:
+        if self.is_handling_session_failure:
+            return
+        self.is_handling_session_failure = True
+        self._record_agent_event("session_refresh_failed", message, severity="error")
+        self._queue_active_session_stop_for_reauth()
+        relogin_message = "Your login expired. Please sign in again before continuing work."
+        self._finish_logout(relogin_message)
+        self._notify_user(relogin_message, "ThriveTracker")
+
+    def _save_local_config_tokens(self) -> None:
+        payload = {
+            "supabase_url": self.config.supabase_url,
+            "email": self.user.email,
+            "storage_bucket": self.config.storage_bucket,
+            "minimum_desktop_version": self.config.minimum_desktop_version,
+            "desktop_update_download_url": self.config.desktop_update_download_url,
+            "desktop_update_required_message": self.config.desktop_update_required_message,
+            "acknowledged_force_reauth_nonce": self.acknowledged_force_reauth_nonce,
+        }
+        if self.user.remember_session:
+            payload["access_token"] = self.user.access_token
+            payload["refresh_token"] = self.user.refresh_token
+        save_local_config(self.paths, payload)
+
+    def _queue_active_session_stop_for_reauth(self) -> None:
+        if not self.active_entry:
+            return
+
+        self._flush_pending_activity(self.active_entry.id)
+        stopped_at = datetime.now(timezone.utc)
+        duration_seconds = max(0, int((stopped_at - self.active_entry.started_at).total_seconds()))
+        self._try_enqueue(
+            "time_entry_stop",
+            {
+                "entry_id": self.active_entry.id,
+                "stopped_at": stopped_at.isoformat(),
+                "duration_seconds": duration_seconds,
+                "reason": "connection_lost",
+            },
+        )
+
     def _schedule_shift_reminder_check(self) -> None:
         if self.shift_reminder_after_id:
             self.root.after_cancel(self.shift_reminder_after_id)
@@ -251,6 +452,7 @@ class MainWindow(ttk.Frame):
         self.pack(fill="both", expand=True)
 
         ttk.Label(self, text=self.user.full_name, style="Muted.TLabel").pack(anchor="w")
+        ttk.Label(self, text=f"Desktop Agent v{__version__}", style="Muted.TLabel").pack(anchor="w", pady=(2, 0))
         ttk.Label(self, text="Time Tracker", style="Title.TLabel").pack(anchor="w", pady=(4, 14))
 
         ttk.Label(self, text="Project").pack(anchor="w")
@@ -271,11 +473,14 @@ class MainWindow(ttk.Frame):
 
         footer = ttk.Frame(self)
         footer.pack(fill="x", side="bottom")
+        self.update_button = ttk.Button(footer, text="Get Update", command=self._open_update_download, style="Link.TButton")
+        self.update_button.pack(side="left")
         logout_button = ttk.Button(footer, text="Logout", command=self.request_logout, style="Link.TButton")
         logout_button.pack(side="right", padx=(0, 12))
         minimize_button = ttk.Button(footer, text="Minimize", command=self.on_minimize)
         minimize_button.pack(side="right")
         ToolTip(minimize_button, "Minimize to Tray")
+        self._refresh_update_button()
 
     def _load_initial_data(self) -> None:
         self._set_busy(True, "Loading projects...")
@@ -285,15 +490,16 @@ class MainWindow(ttk.Frame):
         try:
             self.api.register_device(self.device)
             try:
-                self.api.record_app_launch(self.device.install_id, self.device.hostname)
+                self.api.record_app_launch(self.device.install_id, self.device.hostname, __version__)
             except ApiError:
                 pass
             projects = self.api.get_assigned_projects()
             schedule = self.api.get_va_schedule()
+            runtime_state = self.api.get_agent_runtime_state()
             persisted_state = self.session_state.load()
             startup_state = self._reconcile_startup_state(self.api.get_session_snapshot(), persisted_state)
             today_entries = self.api.get_time_entries_in_range(*self._today_range_iso())
-            self.root.after(0, lambda: self._finish_initial_data(projects, today_entries, startup_state, schedule))
+            self.root.after(0, lambda: self._finish_initial_data(projects, today_entries, startup_state, schedule, runtime_state))
         except Exception as error:
             message = str(error) if isinstance(error, ApiError) else "Could not load your projects."
             self.root.after(0, lambda: self._finish_error(message))
@@ -304,11 +510,15 @@ class MainWindow(ttk.Frame):
         today_entries: list[RangeTimeEntry],
         startup_state: StartupState,
         schedule: VaSchedule,
+        runtime_state: AgentRuntimeState,
     ) -> None:
         self.va_schedule = schedule
         self.projects = projects
         self.project_combo["values"] = [project.name for project in projects]
         self._set_today_total_from_entries(today_entries, startup_state.restored_entry.id if startup_state.restored_entry else None)
+        self._apply_runtime_state(runtime_state, is_initial=True)
+        if not self.winfo_exists():
+            return
 
         if projects:
             self.project_combo.current(0)
@@ -389,7 +599,7 @@ class MainWindow(ttk.Frame):
         finally:
             self.root.after(0, self._finish_logout)
 
-    def _finish_logout(self) -> None:
+    def _finish_logout(self, notice: str = "") -> None:
         self._cancel_screenshot_schedule()
         self._cancel_idle_check()
         self._cancel_settings_sync()
@@ -411,14 +621,22 @@ class MainWindow(ttk.Frame):
             self.paths,
             {
                 "supabase_url": self.config.supabase_url,
+                "email": self.user.email,
                 "storage_bucket": self.config.storage_bucket,
+                "minimum_desktop_version": self.config.minimum_desktop_version,
+                "desktop_update_download_url": self.config.desktop_update_download_url,
+                "desktop_update_required_message": self.config.desktop_update_required_message,
+                "acknowledged_force_reauth_nonce": self.acknowledged_force_reauth_nonce,
             },
         )
         self._set_tray_state("stopped")
         if self.on_logout:
-            self.on_logout()
+            self.on_logout(notice)
 
     def _start_timer(self) -> None:
+        if self._is_update_required():
+            self._set_update_required_state()
+            return
         project = self._selected_project()
         if not project:
             self.error_text.set("Choose a project first.")
@@ -436,6 +654,7 @@ class MainWindow(ttk.Frame):
             self.root.after(0, lambda: self._finish_error(message))
 
     def _finish_start(self, entry: TimeEntry) -> None:
+        self._record_agent_event("tracking_started", "Tracking started.", details={"project_id": entry.project_id})
         self._activate_tracking_session(entry)
 
     def _activate_tracking_session(self, entry: TimeEntry, notice: str = "") -> None:
@@ -633,6 +852,10 @@ class MainWindow(ttk.Frame):
 
     def _resume_after_connectivity_loss(self) -> None:
         if not self.connectivity_resume_project_id:
+            return
+
+        if self._is_update_required():
+            self._set_update_required_state()
             return
 
         if not self.connectivity_resume_ready:
@@ -1058,10 +1281,16 @@ class MainWindow(ttk.Frame):
         delay_ms = HEARTBEAT_INTERVAL_MS
         heartbeat_at = datetime.now(timezone.utc)
         try:
-            self.api.record_heartbeat(self.device.install_id, self._health_payload())
+            self.api.record_heartbeat(self.device.install_id, __version__, self._health_payload())
+            runtime_state = self.api.get_agent_runtime_state()
             self.last_heartbeat_success_at = heartbeat_at
-            self.root.after(0, lambda: self._persist_session_state(force=True))
-        except Exception:
+            self.root.after(0, lambda: (self._persist_session_state(force=True), self._apply_runtime_state(runtime_state)))
+        except Exception as error:
+            message = str(error)
+            if self._is_auth_session_error(message):
+                self.root.after(0, lambda: self._handle_auth_session_failure(message))
+                delay_ms = HEARTBEAT_INTERVAL_MS
+                return
             if self.active_entry and not self.is_connectivity_stopping:
                 heartbeat_anchor = self.last_heartbeat_success_at or self.active_entry.started_at
                 grace_seconds = max(1, self.config.connectivity_grace_minutes) * 60
@@ -1306,7 +1535,16 @@ class MainWindow(ttk.Frame):
         replayed_any = False
         replayed_screenshot = False
         try:
-            for item in self.offline_queue.oldest(limit=10):
+            items = sorted(
+                self.offline_queue.oldest(limit=20),
+                key=lambda item: {
+                    "time_entry_stop": 0,
+                    "activity_log": 1,
+                    "agent_event": 1,
+                    "screenshot_upload": 2,
+                }.get(item.operation_type, 3),
+            )
+            for item in items:
                 try:
                     operation = self._replay_queue_item(item)
                     self.offline_queue.delete(item.id)
@@ -1337,6 +1575,19 @@ class MainWindow(ttk.Frame):
 
         if item.operation_type == "activity_log":
             self.api.insert_activity_log_payload(item.payload)
+            return item.operation_type
+
+        if item.operation_type == "agent_event":
+            self.api.record_agent_event(
+                install_id=item.payload.get("install_id"),
+                hostname=item.payload.get("hostname"),
+                app_version=item.payload.get("app_version") or __version__,
+                event_type=item.payload["event_type"],
+                message=item.payload["message"],
+                occurred_at=item.payload.get("occurred_at"),
+                severity=item.payload.get("severity") or "info",
+                details=item.payload.get("details") or {},
+            )
             return item.operation_type
 
         if item.operation_type == "screenshot_upload":
@@ -1386,16 +1637,25 @@ class MainWindow(ttk.Frame):
         try:
             settings = self.api.get_settings()
             schedule = self.api.get_va_schedule()
-            self.root.after(0, lambda: self._finish_settings_sync(settings, schedule))
-        except Exception:
+            runtime_state = self.api.get_agent_runtime_state()
+            self.root.after(0, lambda: self._finish_settings_sync(settings, schedule, runtime_state))
+        except Exception as error:
+            message = str(error)
+            if self._is_auth_session_error(message):
+                self.root.after(0, lambda: self._handle_auth_session_failure(message))
+                return
             self.root.after(0, self._finish_settings_sync_error)
 
-    def _finish_settings_sync(self, settings: dict[str, str], schedule: VaSchedule) -> None:
+    def _finish_settings_sync(self, settings: dict[str, str], schedule: VaSchedule, runtime_state: AgentRuntimeState) -> None:
         previous_timezone = self.config.timezone
         self.config = self.config.with_settings(settings)
         self.va_schedule = schedule
         self.screenshots.quality = max(1, min(100, self.config.screenshot_quality))
         self.settings_text.set("Settings: synced")
+        self._apply_runtime_state(runtime_state)
+        self._refresh_update_button()
+        if not self.winfo_exists():
+            return
         if self.config.timezone != previous_timezone:
             self._request_today_total_sync()
         self._schedule_shift_reminder_check()
@@ -1748,6 +2008,9 @@ class MainWindow(ttk.Frame):
             self.break_button.configure(state="disabled" if is_busy else "normal")
 
     def _finish_error(self, message: str) -> None:
+        if self._is_auth_session_error(message):
+            self._handle_auth_session_failure(message)
+            return
         self.error_text.set(message)
         self._set_busy(False)
         if self.active_entry:
@@ -1762,6 +2025,8 @@ class MainWindow(ttk.Frame):
         else:
             self.button_text.set("Start")
             self.break_button_text.set("Take Break")
+        if self._is_update_required() and not self.active_entry:
+            self.toggle_button.configure(state="disabled")
         self.refresh_external_state()
 
     def _update_today_text(self) -> None:
@@ -1771,16 +2036,7 @@ class MainWindow(ttk.Frame):
         if not user.remember_session:
             return
 
-        save_local_config(
-            self.paths,
-            {
-                "supabase_url": self.config.supabase_url,
-                "email": user.email,
-                "storage_bucket": self.config.storage_bucket,
-                "access_token": user.access_token,
-                "refresh_token": user.refresh_token,
-            },
-        )
+        self._save_local_config_tokens()
 
 
 def format_duration(total_seconds: int, show_seconds: bool = False) -> str:
