@@ -13,6 +13,77 @@ $OUTPUT_DIR  = "D:\programming\VaTrackers\MagikTracker"
 $INSTALLER_SCRIPT = ".\installer\TrackerInstaller.iss"
 $ISCC_PATH = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 
+function Invoke-InstallerBuild {
+    param(
+        [string]$AppName,
+        [string]$AppVersion,
+        [string]$AppPublisher,
+        [string]$AppExeName,
+        [string]$AppSourceExe,
+        [string]$AppIconFile,
+        [string]$FinalOutputDir,
+        [string]$OutputBaseFilename,
+        [string]$AppId
+    )
+
+    $maxAttempts = 3
+
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $tempOutputDir = Join-Path $env:TEMP ("tracker-installer-build-" + [guid]::NewGuid().ToString())
+        New-Item -ItemType Directory -Force -Path $tempOutputDir | Out-Null
+
+        try {
+            & $ISCC_PATH `
+                "/DMyAppName=$AppName" `
+                "/DMyAppVersion=$AppVersion" `
+                "/DMyAppPublisher=$AppPublisher" `
+                "/DMyAppExeName=$AppExeName" `
+                "/DMyAppSourceExe=$AppSourceExe" `
+                "/DMyAppIconFile=$AppIconFile" `
+                "/DMyAppOutputDir=$tempOutputDir" `
+                "/DMyAppOutputBaseFilename=$OutputBaseFilename" `
+                "/DMyAppId=$AppId" `
+                $INSTALLER_SCRIPT
+
+            if ($LASTEXITCODE -ne 0) {
+                throw "Installer build exited with code $LASTEXITCODE"
+            }
+
+            $builtInstaller = Join-Path $tempOutputDir ($OutputBaseFilename + ".exe")
+            if (-not (Test-Path $builtInstaller)) {
+                throw "Expected installer was not created: $builtInstaller"
+            }
+
+            New-Item -ItemType Directory -Force -Path $FinalOutputDir | Out-Null
+            $finalInstaller = Join-Path $FinalOutputDir ($OutputBaseFilename + ".exe")
+
+            for ($copyAttempt = 1; $copyAttempt -le 5; $copyAttempt++) {
+                try {
+                    Copy-Item -LiteralPath $builtInstaller -Destination $finalInstaller -Force
+                    return $finalInstaller
+                } catch {
+                    if ($copyAttempt -eq 5) {
+                        throw
+                    }
+
+                    Start-Sleep -Seconds 2
+                }
+            }
+        } catch {
+            if ($attempt -eq $maxAttempts) {
+                throw
+            }
+
+            Write-Host "Installer build attempt $attempt failed. Retrying in 5 seconds..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 5
+        } finally {
+            if (Test-Path $tempOutputDir) {
+                Remove-Item -LiteralPath $tempOutputDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 # ------ 1. Read CURRENT version (no increment) ----------------
 $content = Get-Content $INIT_FILE -Raw
 $match   = [regex]::Match($content, '__version__ = "(\d+)\.(\d+)\.(\d+)"')
@@ -65,28 +136,26 @@ if (-not (Test-Path $ISCC_PATH)) {
 
 Write-Host "[4/6] Building Setup.exe installer..." -ForegroundColor Yellow
 try {
-    & $ISCC_PATH `
-        "/DMyAppName=MagikTracker" `
-        "/DMyAppVersion=$newFull" `
-        "/DMyAppPublisher=Magik" `
-        "/DMyAppExeName=ThriveTracker.exe" `
-        "/DMyAppSourceExe=$PSScriptRoot\dist\ThriveTracker.exe" `
-        "/DMyAppIconFile=$PSScriptRoot\assets\icon.ico" `
-        "/DMyAppOutputDir=$OUTPUT_DIR" `
-        "/DMyAppOutputBaseFilename=MagikTracker-Setup-$newDisplay" `
-        "/DMyAppId=MagikTrackerDesktop" `
-        $INSTALLER_SCRIPT
-    if ($LASTEXITCODE -ne 0) { throw "Installer build exited with code $LASTEXITCODE" }
+    $destFile = Invoke-InstallerBuild `
+        -AppName "MagikTracker" `
+        -AppVersion $newFull `
+        -AppPublisher "Magik" `
+        -AppExeName "ThriveTracker.exe" `
+        -AppSourceExe "$PSScriptRoot\dist\ThriveTracker.exe" `
+        -AppIconFile "$PSScriptRoot\assets\icon.ico" `
+        -FinalOutputDir $OUTPUT_DIR `
+        -OutputBaseFilename "MagikTracker-Setup-$newDisplay" `
+        -AppId "MagikTrackerDesktop"
     Write-Host "[4/6] Setup.exe build complete." -ForegroundColor Green
 } catch {
     Set-Content $CONFIG_FILE $thriveConfig -NoNewline
     Write-Host "ERROR: Installer build failed. Config restored." -ForegroundColor Red
+    Write-Host $_.Exception.Message -ForegroundColor Red
     exit 1
 }
 
 # ------ 6. Confirm output path ------------------------------
 New-Item -ItemType Directory -Force -Path $OUTPUT_DIR | Out-Null
-$destFile = "$OUTPUT_DIR\MagikTracker-Setup-$newDisplay.exe"
 Write-Host "[5/6] Saved: $destFile" -ForegroundColor Green
 
 # ------ 7. Restore ThriveTracker config -----------------------
