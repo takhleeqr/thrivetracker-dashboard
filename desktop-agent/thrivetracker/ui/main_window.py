@@ -5,7 +5,6 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import ttk
-import webbrowser
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .. import __app_name__, __version__
@@ -116,6 +115,9 @@ class MainWindow(ttk.Frame):
         self.acknowledged_force_reauth_nonce = config.acknowledged_force_reauth_nonce
         self.is_handling_session_failure = False
         self.is_updating = False
+        self.update_prompt: tk.Toplevel | None = None
+        self.update_prompt_message = tk.StringVar(value="")
+        self.update_prompt_button: ttk.Button | None = None
 
         self.project_var = tk.StringVar()
         self.timer_text = tk.StringVar(value="00:00:00")
@@ -221,37 +223,139 @@ class MainWindow(ttk.Frame):
         return _compare_versions(__version__, self.config.minimum_desktop_version) < 0
 
     def _set_update_required_state(self) -> None:
-        download_hint = f" Download: {self.config.desktop_update_download_url}" if self.config.desktop_update_download_url else ""
         self.status_text.set("Update required")
-        self.tracking_state_text.set("Install the latest desktop build")
-        self.error_text.set(f"{self.config.desktop_update_required_message}{download_hint}")
-        if not self.active_entry and not self.break_started_at:
-            self.toggle_button.configure(state="disabled")
-            self.break_button.configure(state="disabled")
+        self.tracking_state_text.set("Update now to continue")
+        self.error_text.set("")
+        self.toggle_button.configure(state="disabled")
+        self.break_button.configure(state="disabled")
         self._set_tray_state("attention")
         self._refresh_update_button()
+        self._show_update_required_prompt()
 
     def _refresh_update_button(self) -> None:
-        state = "normal" if self.config.desktop_update_download_url else "disabled"
-        label = "Update Now" if self.install_context.can_self_manage and self.install_context.is_running_installed_copy else "Get Update"
-        self.update_button.configure(text=label)
+        state = "normal" if self.config.desktop_update_download_url and self.install_context.can_self_manage else "disabled"
+        self.update_button.configure(text="Update Now")
         self.update_button.configure(state=state)
 
-    def _open_update_download(self) -> None:
+    def _update_required_prompt_copy(self) -> str:
+        if self.active_entry:
+            return "A new version is required. Update now to continue. Your timer will stop first."
+        return "A new version is required. Update now to continue."
+
+    def _show_update_required_prompt(self) -> None:
+        self.update_prompt_message.set(self._update_required_prompt_copy())
+
+        if self.update_prompt and self.update_prompt.winfo_exists():
+            if self.update_prompt_button:
+                self.update_prompt_button.configure(state="disabled" if self.is_updating else "normal")
+            self.update_prompt.deiconify()
+            self.update_prompt.lift()
+            self.update_prompt.grab_set()
+            return
+
+        self.root.protocol("WM_DELETE_WINDOW", self._cancel_update_required_prompt)
+
+        prompt = tk.Toplevel(self.root)
+        prompt.title(f"{__app_name__} Update")
+        prompt.transient(self.root)
+        prompt.resizable(False, False)
+        prompt.configure(bg="#F8FAFC")
+        prompt.protocol("WM_DELETE_WINDOW", self._cancel_update_required_prompt)
+        prompt.geometry("380x185")
+        prompt.minsize(380, 185)
+
+        container = ttk.Frame(prompt, padding=20)
+        container.pack(fill="both", expand=True)
+
+        ttk.Label(container, text="Update required", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(
+            container,
+            textvariable=self.update_prompt_message,
+            wraplength=320,
+            justify="left",
+        ).pack(anchor="w", pady=(12, 18))
+
+        self.update_prompt_button = ttk.Button(container, text="Update now", command=self._confirm_update_required_prompt)
+        self.update_prompt_button.pack(fill="x")
+        if self.is_updating:
+            self.update_prompt_button.configure(state="disabled")
+
+        self.update_prompt = prompt
+        prompt.grab_set()
+        prompt.lift()
+        prompt.focus_force()
+
+    def _cancel_update_required_prompt(self) -> None:
+        self._shutdown_for_required_update()
+
+    def _confirm_update_required_prompt(self) -> None:
         if not self.config.desktop_update_download_url:
+            self.update_prompt_message.set("Update is not ready yet. Please reopen the app in a moment.")
             return
         if self.is_updating:
             return
-        if self.active_entry or self.break_started_at or self.break_resume_project_id:
-            self.error_text.set("Stop the current session before installing an update.")
+        if not self.install_context.can_self_manage:
+            self.update_prompt_message.set("This app copy cannot update itself. Please reopen the installed desktop app.")
             return
-        if self.install_context.can_self_manage and self.install_context.is_running_installed_copy:
-            self.is_updating = True
-            self.error_text.set("")
-            self._set_busy(True, "Downloading update...")
-            threading.Thread(target=self._install_update_worker, daemon=True).start()
+
+        if self.update_prompt_button:
+            self.update_prompt_button.configure(state="disabled")
+
+        if self.active_entry:
+            entry = self.active_entry
+            self._flush_pending_activity(entry.id)
+            self._set_busy(True, "Preparing update...")
+            self.update_prompt_message.set("Preparing update...")
+            threading.Thread(target=self._stop_for_update_worker, args=(entry,), daemon=True).start()
             return
-        webbrowser.open(self.config.desktop_update_download_url)
+
+        if self.break_resume_project_id or self.break_started_at:
+            self._stop_break_shift()
+
+        self._clear_connectivity_resume_state()
+        self._begin_update_install()
+
+    def _begin_update_install(self) -> None:
+        self.is_updating = True
+        self.error_text.set("")
+        self.status_text.set("Updating...")
+        self.tracking_state_text.set("The app will reopen in a moment")
+        self.update_prompt_message.set("Downloading update...")
+        self._set_busy(True, "Downloading update...")
+        if self.update_prompt_button:
+            self.update_prompt_button.configure(state="disabled")
+        threading.Thread(target=self._install_update_worker, daemon=True).start()
+
+    def _stop_for_update_worker(self, entry: TimeEntry) -> None:
+        stopped_at = datetime.now(timezone.utc)
+        duration_seconds = max(0, int((stopped_at - entry.started_at).total_seconds()))
+        try:
+            updated = self.api.update_time_entry_stop(
+                entry_id=entry.id,
+                stopped_at=stopped_at.isoformat(),
+                duration_seconds=duration_seconds,
+                reason="manual",
+            )
+            self.root.after(0, lambda: self._finish_update_stop(duration_seconds if updated else None, queued=False))
+        except Exception:
+            queued = self._try_enqueue(
+                "time_entry_stop",
+                {
+                    "entry_id": entry.id,
+                    "stopped_at": stopped_at.isoformat(),
+                    "duration_seconds": duration_seconds,
+                    "reason": "manual",
+                },
+            )
+            self.root.after(0, lambda: ((self._update_queue_text() if queued else None), self._finish_update_stop(duration_seconds, queued=queued)))
+
+    def _finish_update_stop(self, duration_seconds: int | None, queued: bool) -> None:
+        self._finish_stop(duration_seconds, "manual")
+        if queued:
+            self.update_prompt_message.set("Timer stopped. Downloading update...")
+        else:
+            self.update_prompt_message.set("Downloading update...")
+        self._begin_update_install()
 
     def _install_update_worker(self) -> None:
         try:
@@ -272,19 +376,32 @@ class MainWindow(ttk.Frame):
             self.root.after(0, self._finish_update_handoff)
         except Exception as error:
             self._record_agent_event("update_failed", str(error), severity="error")
-            self.root.after(0, lambda: self._finish_update_error(str(error)))
+            self.root.after(0, self._finish_update_error)
 
     def _finish_update_handoff(self) -> None:
         self.status_text.set("Updating...")
         self.tracking_state_text.set("The app will reopen in a moment")
-        self.error_text.set("Installing the latest desktop build.")
+        self.error_text.set("")
+        self.update_prompt_message.set("Installing update...")
         self.root.after(350, self._exit_for_update_restart)
 
-    def _finish_update_error(self, message: str) -> None:
+    def _finish_update_error(self) -> None:
         self.is_updating = False
-        self.error_text.set(message)
+        self.status_text.set("Update required")
+        self.tracking_state_text.set("Update now to continue")
+        self.error_text.set("")
+        self.update_prompt_message.set("Update failed. Click Update now to try again.")
+        if self.update_prompt_button:
+            self.update_prompt_button.configure(state="normal")
         self._set_busy(False)
         self.refresh_external_state()
+
+    def _shutdown_for_required_update(self) -> None:
+        self.stop_for_app_close()
+        if self.on_app_exit:
+            self.on_app_exit()
+            return
+        self.root.destroy()
 
     def _exit_for_update_restart(self) -> None:
         self._cancel_screenshot_schedule()
@@ -473,8 +590,7 @@ class MainWindow(ttk.Frame):
 
         footer = ttk.Frame(self)
         footer.pack(fill="x", side="bottom")
-        self.update_button = ttk.Button(footer, text="Get Update", command=self._open_update_download, style="Link.TButton")
-        self.update_button.pack(side="left")
+        self.update_button = ttk.Button(footer, text="Update Now", command=self._show_update_required_prompt, style="Link.TButton")
         logout_button = ttk.Button(footer, text="Logout", command=self.request_logout, style="Link.TButton")
         logout_button.pack(side="right", padx=(0, 12))
         minimize_button = ttk.Button(footer, text="Minimize", command=self.on_minimize)
