@@ -14,4 +14,4 @@ def _company_value(name: str, default: str) -> str:
 
 
 __app_name__ = os.getenv("APP_INTERNAL_NAME") or _company_value("APP_INTERNAL_NAME", "ThriveTracker")
-__version__ = "1.14.0"
+__version__ = "1.15.0"
