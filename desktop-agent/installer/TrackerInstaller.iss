@@ -1,5 +1,5 @@
 #ifndef MyAppName
-  #define MyAppName GetStringFileInfo(AddBackslash(SourcePath) + "dist\\ThriveTracker\\ThriveTracker.exe", "ProductName")
+  #define MyAppName GetStringFileInfo(AddBackslash(SourcePath) + "..\\dist\\ThriveTracker\\ThriveTracker.exe", "ProductName")
 #endif
 
 #ifndef MyAppName
@@ -19,15 +19,15 @@
 #endif
 
 #ifndef MyAppSourceExe
-  #define MyAppSourceExe AddBackslash(SourcePath) + "dist\\ThriveTracker\\ThriveTracker.exe"
+  #define MyAppSourceExe AddBackslash(SourcePath) + "..\\dist\\ThriveTracker\\ThriveTracker.exe"
 #endif
 
 #ifndef MyAppSourceDir
-  #define MyAppSourceDir AddBackslash(SourcePath) + "dist\\ThriveTracker"
+  #define MyAppSourceDir AddBackslash(SourcePath) + "..\\dist\\ThriveTracker"
 #endif
 
 #ifndef MyAppIconFile
-  #define MyAppIconFile AddBackslash(SourcePath) + "assets\\icon.ico"
+  #define MyAppIconFile AddBackslash(SourcePath) + "..\\assets\\icon.ico"
 #endif
 
 #ifndef MyAppOutputDir
