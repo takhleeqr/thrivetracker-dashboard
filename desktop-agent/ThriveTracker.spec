@@ -25,7 +25,6 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    [],
     name="ThriveTracker",
     debug=False,
     bootloader_ignore_signals=False,
