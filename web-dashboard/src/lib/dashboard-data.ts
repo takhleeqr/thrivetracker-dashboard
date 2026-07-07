@@ -55,6 +55,7 @@ export type ActivityLog = {
   time_entry_id: string;
   timestamp: string;
   activity_percent: number;
+  app_version?: string | null;
   keystrokes_count?: number;
   mouse_clicks_count?: number;
   mouse_moved?: boolean;
@@ -71,6 +72,7 @@ export type Screenshot = {
   storage_key: string;
   file_size_bytes: number | null;
   activity_percent_at_capture: number | null;
+  app_version?: string | null;
   signedUrl: string | null;
 };
 
@@ -95,6 +97,7 @@ export type AppUsage = {
 
 export type TimeEntryWithMetrics = TimeEntry & {
   averageActivityPercent: number | null;
+  appVersion: string | null;
   idleMinutes: number;
   productivityScore: number;
   projectName: string;
@@ -485,7 +488,7 @@ export async function loadVaDetail(
     supabase
       .from("activity_logs")
       .select(
-        "id,user_id,time_entry_id,timestamp,activity_percent,keystrokes_count,mouse_clicks_count,mouse_moved,active_window_title,active_app_name",
+        "id,user_id,time_entry_id,timestamp,activity_percent,app_version,keystrokes_count,mouse_clicks_count,mouse_moved,active_window_title,active_app_name",
       )
       .eq("user_id", userId)
       .gte("timestamp", selectedRange.start)
@@ -494,7 +497,7 @@ export async function loadVaDetail(
       .limit(1440),
     supabase
       .from("screenshots")
-      .select("id,user_id,time_entry_id,project_id,captured_at,storage_key,file_size_bytes,activity_percent_at_capture")
+      .select("id,user_id,time_entry_id,project_id,captured_at,storage_key,file_size_bytes,activity_percent_at_capture,app_version")
       .eq("user_id", userId)
       .gte("captured_at", selectedRange.start)
       .lte("captured_at", selectedRange.end)
@@ -578,7 +581,7 @@ export async function loadVaDetail(
       .sort((first, second) => first.name.localeCompare(second.name)),
     timeEntries: entries.map((entry) => ({
       ...entry,
-      ...timeEntryMetrics(entry, activityLogs, screenshotsForMetrics),
+      ...timeEntryMetrics(entry, activityLogs, screenshotsForMetrics, agentEvents),
       projectName: entry.project_id ? projectNames.get(entry.project_id) ?? "Assigned Project" : "-",
     })),
     rangeStart: selectedRange.start,
@@ -825,18 +828,53 @@ function productivityScore(activityPercent: number | null): number {
   return Math.max(0, Math.min(100, Math.round(activityPercent)));
 }
 
-function timeEntryMetrics(entry: TimeEntry, logs: ActivityLog[], screenshots: Screenshot[]) {
+function timeEntryMetrics(entry: TimeEntry, logs: ActivityLog[], screenshots: Screenshot[], events: AgentEvent[]) {
   const entryLogs = logs.filter((log) => log.time_entry_id === entry.id && isWithinEntryBounds(log.timestamp, entry));
+  const entryScreenshots = screenshots.filter((screenshot) => screenshot.time_entry_id === entry.id && isWithinEntryBounds(screenshot.captured_at, entry));
   const averageActivityPercent = averageActivity(entryLogs);
 
   return {
     averageActivityPercent,
+    appVersion: resolveEntryAppVersion(entry, entryLogs, entryScreenshots, events),
     idleMinutes: entryLogs.filter((log) => Number(log.activity_percent ?? 0) === 0).length,
     productivityScore: productivityScore(averageActivityPercent),
-    screenshotsTaken: screenshots.filter((screenshot) => screenshot.time_entry_id === entry.id && isWithinEntryBounds(screenshot.captured_at, entry)).length,
+    screenshotsTaken: entryScreenshots.length,
     totalKeystrokes: entryLogs.reduce((sum, log) => sum + Number(log.keystrokes_count ?? 0), 0),
     totalMouseClicks: entryLogs.reduce((sum, log) => sum + Number(log.mouse_clicks_count ?? 0), 0),
   };
+}
+
+function resolveEntryAppVersion(
+  entry: TimeEntry,
+  logs: ActivityLog[],
+  screenshots: Screenshot[],
+  events: AgentEvent[],
+): string | null {
+  const rowCandidates = [
+    ...logs
+      .filter((log) => log.app_version)
+      .map((log) => ({ at: log.timestamp, version: log.app_version as string })),
+    ...screenshots
+      .filter((screenshot) => screenshot.app_version)
+      .map((screenshot) => ({ at: screenshot.captured_at, version: screenshot.app_version as string })),
+  ].sort((first, second) => new Date(first.at).getTime() - new Date(second.at).getTime());
+
+  if (rowCandidates.length) {
+    return rowCandidates[rowCandidates.length - 1]?.version ?? null;
+  }
+
+  const entryStart = new Date(entry.started_at).getTime();
+  const entryEnd = entry.stopped_at ? new Date(entry.stopped_at).getTime() : entryStart;
+  const eventCandidates = events
+    .filter((event) => {
+      if (!event.app_version) return false;
+      if (entry.device_hostname && event.hostname && event.hostname !== entry.device_hostname) return false;
+      const occurredAt = new Date(event.occurred_at).getTime();
+      return occurredAt >= entryStart - 5 * 60_000 && occurredAt <= entryEnd + 5 * 60_000;
+    })
+    .sort((first, second) => new Date(first.occurred_at).getTime() - new Date(second.occurred_at).getTime());
+
+  return eventCandidates[eventCandidates.length - 1]?.app_version ?? null;
 }
 
 function isWithinEntryBounds(value: string, entry: TimeEntry) {

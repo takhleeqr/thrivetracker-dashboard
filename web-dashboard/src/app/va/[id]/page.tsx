@@ -36,6 +36,8 @@ type ActivityLogItem = {
   title: string;
   endedBy: string;
   explanation: string;
+  appVersion: string | null;
+  appVersionHint: string;
   projectLabel: string;
   deviceLabel: string;
   startedAt: string;
@@ -705,6 +707,7 @@ function SelectionDetailsCard({
 }) {
   const isNonWorkSelection = Boolean(selectedActivity && !selectedSession);
   const nonWorkActivity = isNonWorkSelection ? selectedActivity : null;
+  const versionInfo = describeSelectionVersion(detail, selectedActivity, selectedSession);
   const title = selectedSession ? "Selected Work Session" : selectedActivity ? `Selected ${selectedActivity.title}` : "Selected Time Window";
   const subtitle = selectedSession
     ? `${formatDateTimeFull(selectedActivity?.startedAt ?? selectedSession.started_at, timezone)} to ${formatDateTimeFull(selectedActivity?.endedAt ?? selectedSession.stopped_at ?? selectedSession.started_at, timezone)}`
@@ -786,15 +789,13 @@ function SelectionDetailsCard({
             <b>Live</b>
           </div>
         ) : null}
-        {!selectedSession && !selectedActivity && detail.latestAgentHealth ? (
-          <div className="app-usage-row">
-            <span>
-              <strong>Agent version</strong>
-              <small>{detail.latestAgentHealth.app_version || "Version not reported yet"}</small>
-            </span>
-            <b>Build</b>
-          </div>
-        ) : null}
+        <div className="app-usage-row">
+          <span>
+            <strong>App version</strong>
+            <small>{versionInfo.caption}</small>
+          </span>
+          <b>{versionInfo.value}</b>
+        </div>
         {selectedSession ? (
           <div className="app-usage-row">
             <span>
@@ -886,6 +887,42 @@ function humanizeAgentEvent(value: string) {
     update_started: "Desktop update started",
   };
   return mapping[value] ?? value.replaceAll("_", " ");
+}
+
+function describeSelectionVersion(
+  detail: VaDetail,
+  selectedActivity: ActivityLogItem | null,
+  selectedSession: VaDetail["timeEntries"][number] | null,
+) {
+  if (selectedSession?.appVersion) {
+    return {
+      value: formatVersionLabel(selectedSession.appVersion),
+      caption: "Captured from activity and screenshot data recorded during this work session.",
+    };
+  }
+
+  if (selectedActivity?.appVersion) {
+    return {
+      value: formatVersionLabel(selectedActivity.appVersion),
+      caption: selectedActivity.appVersionHint,
+    };
+  }
+
+  if (detail.latestAgentHealth?.app_version) {
+    return {
+      value: formatVersionLabel(detail.latestAgentHealth.app_version),
+      caption: selectedActivity
+        ? "This row does not have an exact stored app version yet, so this shows the latest version reported by the desktop agent."
+        : "Latest version reported by the desktop agent.",
+    };
+  }
+
+  return {
+    value: "Version not recorded yet",
+    caption: selectedActivity
+      ? "This older row was captured before row-level app version tracking was available, or the agent did not report it."
+      : "The desktop agent has not reported a version yet.",
+  };
 }
 
 function ActivityChart({
@@ -1215,6 +1252,10 @@ function buildActivityLogItems(detail: VaDetail | null): ActivityLogItem[] {
       title: "Work",
       endedBy: stopReasonShortLabel(entry),
       explanation: stopReasonExplanation(entry),
+      appVersion: entry.appVersion,
+      appVersionHint: entry.appVersion
+        ? "Captured from activity and screenshot data recorded during this work session."
+        : "This work session does not have a row-specific app version recorded yet.",
       projectLabel: entry.projectName,
       deviceLabel: entry.device_hostname ? deviceLabel(entry.device_hostname, entry.device_os_username) : "Device not captured",
       startedAt: segment.displayStartedAt,
@@ -1234,6 +1275,8 @@ function buildActivityLogItems(detail: VaDetail | null): ActivityLogItem[] {
       title: "Not Tracking",
       endedBy: "-",
       explanation: "No timer was running during this part of the selected time window.",
+      appVersion: null,
+      appVersionHint: "There was no active tracked session during this period, so no row-specific app version was captured.",
       projectLabel: "-",
       deviceLabel: "-",
       startedAt: detail.rangeStart,
@@ -1266,6 +1309,8 @@ function buildGapItem(
       title: "Not Tracking",
       endedBy: "-",
       explanation: "No timer was running during this part of the selected time window.",
+      appVersion: null,
+      appVersionHint: "There was no earlier tracked session in this selected window to attribute a desktop version to.",
       projectLabel: "-",
       deviceLabel: "-",
       startedAt,
@@ -1283,6 +1328,10 @@ function buildGapItem(
       title: "Break",
       endedBy: "-",
       explanation: "The VA paused tracked work and stayed on break until the next work session began.",
+      appVersion: previousEntry.appVersion ?? null,
+      appVersionHint: previousEntry.appVersion
+        ? "Derived from the work session immediately before this break."
+        : "The break came after a session that did not record a row-specific app version.",
       projectLabel: previousEntry.projectName,
       deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
@@ -1300,6 +1349,10 @@ function buildGapItem(
       title: "Idle",
       endedBy: "-",
       explanation: "Tracking had already stopped because there was no keyboard or mouse activity for the idle limit.",
+      appVersion: previousEntry.appVersion ?? null,
+      appVersionHint: previousEntry.appVersion
+        ? "Derived from the work session that ended because of inactivity."
+        : "This idle period follows a session that did not record a row-specific app version.",
       projectLabel: previousEntry.projectName,
       deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
@@ -1319,8 +1372,12 @@ function buildGapItem(
       explanation: previousEntry.stop_reason === "connection_lost"
         ? "The previous work session was closed automatically after the connection was lost."
         : previousEntry.stop_reason === "crash"
-          ? "The previous work session was closed automatically after the connection or app was lost."
+        ? "The previous work session was closed automatically after the connection or app was lost."
         : "The previous work session ended because the desktop app was closed.",
+      appVersion: previousEntry.appVersion ?? null,
+      appVersionHint: previousEntry.appVersion
+        ? "Derived from the last tracked session before this offline period."
+        : "This offline period follows a session that did not record a row-specific app version.",
       projectLabel: previousEntry.projectName,
       deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
@@ -1338,6 +1395,10 @@ function buildGapItem(
       title: "Offline",
       endedBy: "-",
       explanation: "The timer is still open, but the desktop app stopped sending heartbeats. Any later work will appear after the desktop app reconnects and syncs.",
+      appVersion: previousEntry.appVersion ?? null,
+      appVersionHint: previousEntry.appVersion
+        ? "Derived from the still-open work session that stopped sending heartbeats."
+        : "The open session did not record a row-specific app version yet.",
       projectLabel: previousEntry.projectName,
       deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
       startedAt,
@@ -1354,6 +1415,10 @@ function buildGapItem(
     title: "Not Tracking",
     endedBy: "-",
     explanation: "The VA had stopped tracking, and no new work session had started yet.",
+    appVersion: previousEntry.appVersion ?? null,
+    appVersionHint: previousEntry.appVersion
+      ? "Derived from the last tracked session before this non-tracking period."
+      : "The earlier session in this window did not record a row-specific app version.",
     projectLabel: previousEntry.projectName,
     deviceLabel: previousEntry.device_hostname ? deviceLabel(previousEntry.device_hostname, previousEntry.device_os_username) : "Device not captured",
     startedAt,
@@ -1610,6 +1675,11 @@ function earningsForSeconds(seconds: number, hourlyRate: number) {
 
 function deviceLabel(hostname: string, osUsername: string | null | undefined) {
   return osUsername ? `${hostname} (${osUsername})` : hostname;
+}
+
+function formatVersionLabel(value: string) {
+  const cleaned = value.trim();
+  return cleaned.toLowerCase().startsWith("v") ? cleaned : `v${cleaned}`;
 }
 
 function downloadFromClick(event: MouseEvent<HTMLButtonElement>, url: string, storageKey: string) {

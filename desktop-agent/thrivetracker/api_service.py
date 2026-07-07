@@ -194,6 +194,7 @@ class SupabaseApiService:
         time_entry_id: str,
         project_id: str,
         activity_percent: float | None = None,
+        app_version: str | None = None,
     ) -> None:
         self.upload_screenshot_file(
             bucket_name=bucket_name,
@@ -204,6 +205,7 @@ class SupabaseApiService:
             time_entry_id=time_entry_id,
             project_id=project_id,
             activity_percent=activity_percent,
+            app_version=app_version,
         )
 
     def upload_screenshot_file(
@@ -216,6 +218,7 @@ class SupabaseApiService:
         time_entry_id: str,
         project_id: str,
         activity_percent: float | None = None,
+        app_version: str | None = None,
     ) -> None:
         self._upload_storage_object(bucket_name, file_path, storage_key)
         self._request(
@@ -230,6 +233,7 @@ class SupabaseApiService:
                 "storage_key": storage_key,
                 "file_size_bytes": file_size_bytes,
                 "activity_percent_at_capture": activity_percent,
+                "app_version": app_version,
             },
             prefer="return=minimal",
         )

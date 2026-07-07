@@ -1253,6 +1253,7 @@ class MainWindow(ttk.Frame):
                 time_entry_id=time_entry_id,
                 project_id=project_id,
                 activity_percent=self.last_activity_percent,
+                app_version=__version__,
             )
             screenshot.file_path.unlink(missing_ok=True)
             self.root.after(0, lambda: self._finish_screenshot_upload(screenshot))
@@ -1267,6 +1268,7 @@ class MainWindow(ttk.Frame):
                     "time_entry_id": time_entry_id,
                     "project_id": project_id,
                     "activity_percent": self.last_activity_percent,
+                    "app_version": __version__,
                 },
                 file_path=screenshot.file_path,
             )
@@ -1389,6 +1391,7 @@ class MainWindow(ttk.Frame):
             "activity_percent": snapshot.activity_percent,
             "active_window_title": active_window_title,
             "active_app_name": active_app_name,
+            "app_version": __version__,
         }
         try:
             self.api.insert_activity_log_payload(payload)
@@ -1735,6 +1738,7 @@ class MainWindow(ttk.Frame):
                 time_entry_id=item.payload["time_entry_id"],
                 project_id=item.payload["project_id"],
                 activity_percent=item.payload.get("activity_percent"),
+                app_version=item.payload.get("app_version") or __version__,
             )
             item.file_path.unlink(missing_ok=True)
             return item.operation_type
