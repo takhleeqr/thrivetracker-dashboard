@@ -22,6 +22,7 @@ function Invoke-InstallerBuild {
         [string]$AppPublisher,
         [string]$AppExeName,
         [string]$AppSourceExe,
+        [string]$AppSourceDir,
         [string]$AppIconFile,
         [string]$FinalOutputDir,
         [string]$OutputBaseFilename,
@@ -41,6 +42,7 @@ function Invoke-InstallerBuild {
                 "/DMyAppPublisher=$AppPublisher" `
                 "/DMyAppExeName=$AppExeName" `
                 "/DMyAppSourceExe=$AppSourceExe" `
+                "/DMyAppSourceDir=$AppSourceDir" `
                 "/DMyAppIconFile=$AppIconFile" `
                 "/DMyAppOutputDir=$tempOutputDir" `
                 "/DMyAppOutputBaseFilename=$OutputBaseFilename" `
@@ -142,7 +144,8 @@ try {
         -AppVersion $newFull `
         -AppPublisher "ThriveTracker" `
         -AppExeName "ThriveTracker.exe" `
-        -AppSourceExe "$PSScriptRoot\dist\ThriveTracker.exe" `
+        -AppSourceExe "$PSScriptRoot\dist\ThriveTracker\ThriveTracker.exe" `
+        -AppSourceDir "$PSScriptRoot\dist\ThriveTracker" `
         -AppIconFile "$PSScriptRoot\assets\icon.ico" `
         -FinalOutputDir $OUTPUT_DIR `
         -OutputBaseFilename "ThriveTracker-Setup-$newDisplay" `

@@ -1,5 +1,5 @@
 #ifndef MyAppName
-  #define MyAppName GetStringFileInfo(AddBackslash(SourcePath) + "dist\\ThriveTracker.exe", "ProductName")
+  #define MyAppName GetStringFileInfo(AddBackslash(SourcePath) + "dist\\ThriveTracker\\ThriveTracker.exe", "ProductName")
 #endif
 
 #ifndef MyAppName
@@ -19,7 +19,11 @@
 #endif
 
 #ifndef MyAppSourceExe
-  #define MyAppSourceExe AddBackslash(SourcePath) + "dist\\ThriveTracker.exe"
+  #define MyAppSourceExe AddBackslash(SourcePath) + "dist\\ThriveTracker\\ThriveTracker.exe"
+#endif
+
+#ifndef MyAppSourceDir
+  #define MyAppSourceDir AddBackslash(SourcePath) + "dist\\ThriveTracker"
 #endif
 
 #ifndef MyAppIconFile
@@ -61,7 +65,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "{#MyAppSourceExe}"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
+Source: "{#MyAppSourceDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
