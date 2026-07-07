@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
 import sys
 import textwrap
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 import httpx
@@ -88,12 +90,14 @@ def download_update_package(download_url: str, temp_dir: Path, app_name: str) ->
         raise RuntimeError("No update link is configured for this desktop app.")
 
     temp_dir.mkdir(parents=True, exist_ok=True)
-    destination = temp_dir / f"{app_name}-update-{uuid4().hex}.exe"
+    destination: Path | None = None
 
     try:
         with httpx.Client(follow_redirects=True, timeout=60.0) as client:
             with client.stream("GET", download_url) as response:
                 response.raise_for_status()
+                source_name = _infer_download_name(response, download_url, app_name)
+                destination = _build_temp_download_path(temp_dir, source_name, app_name)
                 with destination.open("wb") as handle:
                     for chunk in response.iter_bytes():
                         if chunk:
@@ -106,6 +110,26 @@ def download_update_package(download_url: str, temp_dir: Path, app_name: str) ->
         raise RuntimeError("The downloaded update file was empty.")
 
     return destination
+
+
+def is_likely_installer_package(downloaded_file: Path, download_url: str = "") -> bool:
+    candidates = [downloaded_file.name.casefold(), download_url.casefold()]
+    if any(token in candidate for candidate in candidates for token in ("setup", "installer")):
+        return True
+
+    try:
+        with downloaded_file.open("rb") as handle:
+            sample = handle.read(1024 * 1024)
+    except OSError:
+        return False
+
+    markers = (
+        b"Inno Setup",
+        b"NullsoftInst",
+        b"NSIS Error",
+        b"WiX Toolset",
+    )
+    return any(marker in sample for marker in markers)
 
 
 def queue_replace_and_restart(downloaded_executable: Path, target_executable: Path) -> None:
@@ -227,6 +251,34 @@ def _spawn_post_exit_script(script_body: str, args: list[str]) -> None:
 def _powershell_executable() -> str:
     windir = os.getenv("WINDIR", r"C:\Windows")
     return str(Path(windir) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe")
+
+
+def _build_temp_download_path(temp_dir: Path, source_name: str, app_name: str) -> Path:
+    parsed = Path(source_name)
+    stem = _sanitize_filename(parsed.stem) or f"{app_name}-update"
+    suffix = parsed.suffix if parsed.suffix else ".exe"
+    return temp_dir / f"{stem}-{uuid4().hex}{suffix}"
+
+
+def _infer_download_name(response: httpx.Response, download_url: str, app_name: str) -> str:
+    content_disposition = response.headers.get("content-disposition", "")
+    for pattern in (r'filename\*=UTF-8\'\'([^;]+)', r'filename="?([^";]+)"?'):
+        match = re.search(pattern, content_disposition, flags=re.IGNORECASE)
+        if match:
+            candidate = Path(unquote(match.group(1))).name
+            if candidate:
+                return candidate
+
+    for candidate_url in (str(response.url), download_url):
+        path_name = Path(unquote(urlparse(candidate_url).path)).name
+        if path_name:
+            return path_name
+
+    return f"{app_name}-update.exe"
+
+
+def _sanitize_filename(value: str) -> str:
+    return re.sub(r'[^A-Za-z0-9._-]+', '-', value).strip(".- ")
 
 
 def _same_path(left: Path | None, right: Path | None) -> bool:

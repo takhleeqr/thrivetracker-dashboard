@@ -14,7 +14,13 @@ from ..app_paths import AppPaths
 from ..device_identity import DeviceIdentity
 from ..auth_service import AuthenticatedUser
 from ..config import AppConfig, save_local_config
-from ..install_manager import download_update_package, get_install_context, queue_replace_and_restart, queue_run_installer_and_restart
+from ..install_manager import (
+    download_update_package,
+    get_install_context,
+    is_likely_installer_package,
+    queue_replace_and_restart,
+    queue_run_installer_and_restart,
+)
 from ..offline_queue import OfflineQueue, QueueItem
 from ..session_state import PersistedSessionState, SessionStateStore
 from ..screenshot_service import CapturedScreenshot, ScreenshotService
@@ -364,7 +370,7 @@ class MainWindow(ttk.Frame):
                 self.paths.temp_dir,
                 __app_name__,
             )
-            if "setup" in downloaded_file.name.lower():
+            if is_likely_installer_package(downloaded_file, self.config.desktop_update_download_url):
                 queue_run_installer_and_restart(downloaded_file, self.install_context.installed_executable)
             else:
                 queue_replace_and_restart(downloaded_file, self.install_context.installed_executable)
