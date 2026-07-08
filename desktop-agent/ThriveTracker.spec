@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from thrivetracker import __app_name__
+
+
+APP_NAME = __app_name__
 
 a = Analysis(
     ["agent.py"],
@@ -25,7 +29,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="ThriveTracker",
+    name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -51,5 +55,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="ThriveTracker",
+    name=APP_NAME,
 )

@@ -466,6 +466,10 @@ class MainWindow(ttk.Frame):
         except Exception:
             self._try_enqueue("agent_event", payload)
 
+    def _is_other_device_tracking_error(self, message: str) -> bool:
+        normalized = message.casefold()
+        return "already tracking on" in normalized or "tracking is already running on" in normalized
+
     def _force_reauthentication(self, reason: str | None = None) -> None:
         message = reason or "An admin asked you to sign in again."
         self._record_agent_event("force_reauth", message, severity="warning")
@@ -795,6 +799,13 @@ class MainWindow(ttk.Frame):
             self.root.after(0, lambda: self._finish_start(entry))
         except Exception as error:
             message = str(error) if isinstance(error, ApiError) else "Could not start the timer."
+            if self._is_other_device_tracking_error(message):
+                self._record_agent_event(
+                    "multi_device_start_blocked",
+                    message,
+                    severity="warning",
+                    details={"project_id": project.id},
+                )
             self.root.after(0, lambda: self._finish_error(message))
 
     def _finish_start(self, entry: TimeEntry) -> None:
@@ -1955,7 +1966,10 @@ class MainWindow(ttk.Frame):
         if active_entry:
             if active_entry.device_fingerprint and active_entry.device_fingerprint != self.device.fingerprint_hash:
                 self._clear_session_state()
-                return StartupState(notice=f"Tracking is already running on {active_entry.device_hostname or 'another device'}.")
+                # Do not show a blocking startup warning for another device here.
+                # The real single-device enforcement happens when Start is pressed,
+                # so stale or just-closed sessions from another PC do not scare the VA.
+                return StartupState()
 
             runtime_at = (
                 persisted_state.last_runtime_at

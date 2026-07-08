@@ -109,7 +109,7 @@ class LoginWindow(ttk.Frame):
         if str(self.login_button["state"]) == "disabled":
             return
 
-        self.status_text.set("Installing ThriveTracker...")
+        self.status_text.set(f"Installing {__app_name__}...")
         self.login_button.configure(state="disabled")
         threading.Thread(target=self._install_self_worker, daemon=True).start()
 

@@ -38,9 +38,15 @@ def get_install_context(app_name: str) -> InstallContext:
     local_appdata = Path(os.getenv("LOCALAPPDATA") or Path.home())
     appdata = Path(os.getenv("APPDATA") or Path.home())
     install_dir = local_appdata / "Programs" / app_name
-    installed_executable = install_dir / f"{app_name}.exe"
     start_menu_shortcut = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / f"{app_name}.lnk"
     current_executable = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else None
+    default_installed_executable = install_dir / f"{app_name}.exe"
+    running_from_install_dir = _same_path(current_executable.parent, install_dir) if current_executable else False
+    installed_executable = (
+        current_executable
+        if current_executable and running_from_install_dir and (current_executable.parent / "_internal").exists()
+        else default_installed_executable
+    )
 
     return InstallContext(
         app_name=app_name,
@@ -49,7 +55,10 @@ def get_install_context(app_name: str) -> InstallContext:
         install_dir=install_dir,
         installed_executable=installed_executable,
         start_menu_shortcut=start_menu_shortcut,
-        is_running_installed_copy=_same_path(current_executable, installed_executable),
+        is_running_installed_copy=(
+            _same_path(current_executable, installed_executable)
+            or (current_executable is not None and running_from_install_dir and (current_executable.parent / "_internal").exists())
+        ),
     )
 
 
@@ -58,8 +67,23 @@ def install_self(app_name: str) -> InstallContext:
     if not context.can_self_manage or not context.current_executable:
         raise RuntimeError("Self-install is only available in the packaged desktop app.")
 
+    source_dir = context.current_executable.parent
     context.install_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(context.current_executable, context.installed_executable)
+
+    # Folder-based builds need the launcher EXE and the bundled runtime files.
+    # Copying only the EXE leaves out `_internal`, which breaks startup.
+    if (source_dir / "_internal").exists():
+        for child in source_dir.iterdir():
+            destination = context.install_dir / child.name
+            if child.is_dir():
+                if destination.exists():
+                    shutil.rmtree(destination)
+                shutil.copytree(child, destination)
+            else:
+                shutil.copy2(child, destination)
+    else:
+        shutil.copy2(context.current_executable, context.installed_executable)
+
     _create_start_menu_shortcut(context.installed_executable, context.start_menu_shortcut)
     return get_install_context(app_name)
 

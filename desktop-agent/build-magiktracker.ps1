@@ -20,6 +20,7 @@ function Invoke-InstallerBuild {
         [string]$AppPublisher,
         [string]$AppExeName,
         [string]$AppSourceExe,
+        [string]$AppSourceDir,
         [string]$AppIconFile,
         [string]$FinalOutputDir,
         [string]$OutputBaseFilename,
@@ -39,6 +40,7 @@ function Invoke-InstallerBuild {
                 "/DMyAppPublisher=$AppPublisher" `
                 "/DMyAppExeName=$AppExeName" `
                 "/DMyAppSourceExe=$AppSourceExe" `
+                "/DMyAppSourceDir=$AppSourceDir" `
                 "/DMyAppIconFile=$AppIconFile" `
                 "/DMyAppOutputDir=$tempOutputDir" `
                 "/DMyAppOutputBaseFilename=$OutputBaseFilename" `
@@ -140,8 +142,9 @@ try {
         -AppName "MagikTracker" `
         -AppVersion $newFull `
         -AppPublisher "Magik" `
-        -AppExeName "ThriveTracker.exe" `
-        -AppSourceExe "$PSScriptRoot\dist\ThriveTracker.exe" `
+        -AppExeName "MagikTracker.exe" `
+        -AppSourceExe "$PSScriptRoot\dist\MagikTracker\MagikTracker.exe" `
+        -AppSourceDir "$PSScriptRoot\dist\MagikTracker" `
         -AppIconFile "$PSScriptRoot\assets\icon.ico" `
         -FinalOutputDir $OUTPUT_DIR `
         -OutputBaseFilename "MagikTracker-Setup-$newDisplay" `
