@@ -13,7 +13,7 @@ from ..api_service import AgentRuntimeState, ApiError, Project, RangeTimeEntry, 
 from ..app_paths import AppPaths
 from ..device_identity import DeviceIdentity
 from ..auth_service import AuthenticatedUser
-from ..config import AppConfig, save_local_config
+from ..config import AppConfig, load_local_config, save_local_config
 from ..install_manager import (
     download_update_package,
     get_install_context,
@@ -209,6 +209,7 @@ class MainWindow(ttk.Frame):
             desktop_update_download_url=runtime_state.desktop_update_download_url,
             desktop_update_required_message=runtime_state.desktop_update_required_message,
         )
+        self._persist_local_runtime_state()
 
         if runtime_state.force_reauth_nonce > self.acknowledged_force_reauth_nonce:
             if is_initial and self.user.session_origin == "password":
@@ -248,7 +249,15 @@ class MainWindow(ttk.Frame):
             return "A new version is required. Update now to continue. Your timer will stop first."
         return "A new version is required. Update now to continue."
 
+    def _present_update_required_window(self) -> None:
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+        self.root.attributes("-topmost", True)
+        self.root.after(250, lambda: self.root.attributes("-topmost", False))
+
     def _show_update_required_prompt(self) -> None:
+        self._present_update_required_window()
         self.update_prompt_message.set(self._update_required_prompt_copy())
 
         if self.update_prompt and self.update_prompt.winfo_exists():
@@ -256,7 +265,10 @@ class MainWindow(ttk.Frame):
                 self.update_prompt_button.configure(state="disabled" if self.is_updating else "normal")
             self.update_prompt.deiconify()
             self.update_prompt.lift()
+            self.update_prompt.attributes("-topmost", True)
+            self.update_prompt.after(250, lambda: self.update_prompt.attributes("-topmost", False))
             self.update_prompt.grab_set()
+            self.update_prompt.focus_force()
             return
 
         self.root.protocol("WM_DELETE_WINDOW", self._cancel_update_required_prompt)
@@ -289,6 +301,8 @@ class MainWindow(ttk.Frame):
         self.update_prompt = prompt
         prompt.grab_set()
         prompt.lift()
+        prompt.attributes("-topmost", True)
+        prompt.after(250, lambda: prompt.attributes("-topmost", False))
         prompt.focus_force()
 
     def _cancel_update_required_prompt(self) -> None:
@@ -296,7 +310,8 @@ class MainWindow(ttk.Frame):
 
     def _confirm_update_required_prompt(self) -> None:
         if not self.config.desktop_update_download_url:
-            self.update_prompt_message.set("Update is not ready yet. Please reopen the app in a moment.")
+            self.update_prompt_message.set("Update details are still syncing. Please try again in a moment.")
+            self._sync_settings()
             return
         if self.is_updating:
             return
@@ -325,7 +340,7 @@ class MainWindow(ttk.Frame):
         self.is_updating = True
         self.error_text.set("")
         self.status_text.set("Updating...")
-        self.tracking_state_text.set("The app will reopen in a moment")
+        self.tracking_state_text.set("Installer will open in a moment")
         self.update_prompt_message.set("Downloading update...")
         self._set_busy(True, "Downloading update...")
         if self.update_prompt_button:
@@ -371,7 +386,7 @@ class MainWindow(ttk.Frame):
                 __app_name__,
             )
             if is_likely_installer_package(downloaded_file, self.config.desktop_update_download_url):
-                queue_run_installer_and_restart(downloaded_file, self.install_context.installed_executable)
+                queue_run_installer_and_restart(downloaded_file)
             else:
                 queue_replace_and_restart(downloaded_file, self.install_context.installed_executable)
             self._record_agent_event(
@@ -386,9 +401,9 @@ class MainWindow(ttk.Frame):
 
     def _finish_update_handoff(self) -> None:
         self.status_text.set("Updating...")
-        self.tracking_state_text.set("The app will reopen in a moment")
+        self.tracking_state_text.set("Installer will open in a moment")
         self.error_text.set("")
-        self.update_prompt_message.set("Installing update...")
+        self.update_prompt_message.set("Opening installer...")
         self.root.after(350, self._exit_for_update_restart)
 
     def _finish_update_error(self) -> None:
@@ -478,7 +493,14 @@ class MainWindow(ttk.Frame):
         self._notify_user(relogin_message, "ThriveTracker")
 
     def _save_local_config_tokens(self) -> None:
-        payload = {
+        payload = self._local_runtime_config_payload()
+        if self.user.remember_session:
+            payload["access_token"] = self.user.access_token
+            payload["refresh_token"] = self.user.refresh_token
+        save_local_config(self.paths, payload)
+
+    def _local_runtime_config_payload(self) -> dict[str, str | int]:
+        return {
             "supabase_url": self.config.supabase_url,
             "email": self.user.email,
             "storage_bucket": self.config.storage_bucket,
@@ -487,9 +509,10 @@ class MainWindow(ttk.Frame):
             "desktop_update_required_message": self.config.desktop_update_required_message,
             "acknowledged_force_reauth_nonce": self.acknowledged_force_reauth_nonce,
         }
-        if self.user.remember_session:
-            payload["access_token"] = self.user.access_token
-            payload["refresh_token"] = self.user.refresh_token
+
+    def _persist_local_runtime_state(self) -> None:
+        payload = load_local_config(self.paths)
+        payload.update(self._local_runtime_config_payload())
         save_local_config(self.paths, payload)
 
     def _queue_active_session_stop_for_reauth(self) -> None:
@@ -624,9 +647,9 @@ class MainWindow(ttk.Frame):
                 force_reauth_nonce=0,
                 force_reauth_reason=None,
                 force_reauth_requested_at=None,
-                minimum_desktop_version="",
-                desktop_update_download_url="",
-                desktop_update_required_message="",
+                minimum_desktop_version=self.config.minimum_desktop_version,
+                desktop_update_download_url=self.config.desktop_update_download_url,
+                desktop_update_required_message=self.config.desktop_update_required_message,
             )
             persisted_state = self.session_state.load()
             startup_state = self._reconcile_startup_state(self.api.get_session_snapshot(), persisted_state)
@@ -749,18 +772,7 @@ class MainWindow(ttk.Frame):
         self.last_runtime_tick_at = None
         self._clear_connectivity_resume_state()
         self._clear_session_state()
-        save_local_config(
-            self.paths,
-            {
-                "supabase_url": self.config.supabase_url,
-                "email": self.user.email,
-                "storage_bucket": self.config.storage_bucket,
-                "minimum_desktop_version": self.config.minimum_desktop_version,
-                "desktop_update_download_url": self.config.desktop_update_download_url,
-                "desktop_update_required_message": self.config.desktop_update_required_message,
-                "acknowledged_force_reauth_nonce": self.acknowledged_force_reauth_nonce,
-            },
-        )
+        save_local_config(self.paths, self._local_runtime_config_payload())
         self._set_tray_state("stopped")
         if self.on_logout:
             self.on_logout(notice)

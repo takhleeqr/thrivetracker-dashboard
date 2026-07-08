@@ -169,13 +169,11 @@ def queue_replace_and_restart(downloaded_executable: Path, target_executable: Pa
     _spawn_post_exit_script(script, [str(downloaded_executable), str(target_executable), str(os.getpid())])
 
 
-def queue_run_installer_and_restart(installer_path: Path, installed_executable: Path) -> None:
-    installed_executable.parent.mkdir(parents=True, exist_ok=True)
+def queue_run_installer_and_restart(installer_path: Path) -> None:
     script = textwrap.dedent(
         """
         param(
           [string]$InstallerPath,
-          [string]$TargetPath,
           [int]$WaitPid
         )
 
@@ -186,20 +184,10 @@ def queue_run_installer_and_restart(installer_path: Path, installed_executable: 
           Start-Sleep -Milliseconds 500
         }
 
-        Start-Process -FilePath $InstallerPath -ArgumentList '/VERYSILENT','/NORESTART','/SP-' -Wait -WindowStyle Hidden
-
-        for ($i = 0; $i -lt 60; $i++) {
-          if (Test-Path -LiteralPath $TargetPath) {
-            Start-Process -FilePath $TargetPath -WorkingDirectory (Split-Path -Parent $TargetPath)
-            break
-          }
-          Start-Sleep -Seconds 1
-        }
-
-        Remove-Item -LiteralPath $InstallerPath -Force -ErrorAction SilentlyContinue
+        Start-Process -FilePath $InstallerPath -WorkingDirectory (Split-Path -Parent $InstallerPath)
         """
     ).strip()
-    _spawn_post_exit_script(script, [str(installer_path), str(installed_executable), str(os.getpid())])
+    _spawn_post_exit_script(script, [str(installer_path), str(os.getpid())])
 
 
 def _create_start_menu_shortcut(target_executable: Path, shortcut_path: Path) -> None:
